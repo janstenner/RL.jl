@@ -33,7 +33,7 @@ function create_chain(;na, ns, use_gpu, is_actor, init, copyfrom = nothing, nna_
     n
 end
 
-function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 128, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, trajectory_length = 1000, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_envs = 2)
+function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 128, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, trajectory_length = 1000, mono = false, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_envs = 2)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -41,7 +41,11 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
 
     init = Flux.glorot_uniform(rng)
 
-    reward_size = 1
+    if mono
+        reward_size = 1
+    else
+        reward_size = size(action_space)[1]
+    end
 
     Agent(
         policy = PPOPolicy(
@@ -80,7 +84,7 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
                 state = Float32 => (size(state_space)[1], n_envs),
                 action = Float32 => (size(action_space)[1], n_envs),
                 action_log_prob = Float32 => (size(action_space)[1], n_envs),
-                reward = Float32 => (n_envs,),
+                reward = Float32 => (reward_size, n_envs,),
                 terminal = Bool => (n_envs,),
                 value = Float32 => (n_envs,),
         ),
@@ -107,7 +111,7 @@ end
 - `dist = Categorical`,
 - `rng = Random.GLOBAL_RNG`,
 
-By default, `dist` is set to `Categorical`, which means it will only works
+If `dist` is set to `Categorical`, it means it will only work
 on environments of discrete actions. To work with environments of continuous
 actions `dist` should be set to `Normal` and the `actor` in the `approximator`
 should be a `GaussianNetwork`. Using it with a `GaussianNetwork` supports 
@@ -115,6 +119,10 @@ multi-dimensional action spaces, though it only supports it under the assumption
 that the dimensions are independent since the `GaussianNetwork` outputs a single
 `μ` and `σ` for each dimension which is used to simplify the calculations.
 """
+
+const Normal = 1
+const Categorical = 2
+
 mutable struct PPOPolicy{A<:ActorCritic,D,R} <: AbstractPolicy
     approximator::A
     γ::Float32
@@ -152,7 +160,7 @@ function PPOPolicy(;
     actor_loss_weight=1.0f0,
     critic_loss_weight=0.5f0,
     entropy_loss_weight=0.01f0,
-    dist=Categorical,
+    dist=Normal,
     rng=Random.GLOBAL_RNG
 )
     PPOPolicy{typeof(approximator),dist,typeof(rng)}(
@@ -178,7 +186,7 @@ function PPOPolicy(;
     )
 end
 
-function RLBase.prob(
+function prob(
     p::PPOPolicy{<:ActorCritic{<:GaussianNetwork},Normal},
     state::AbstractArray,
     mask,
@@ -193,7 +201,7 @@ function RLBase.prob(
     end
 end
 
-function RLBase.prob(p::PPOPolicy{<:ActorCritic,Categorical}, state::AbstractArray, mask)
+function prob(p::PPOPolicy{<:ActorCritic,Categorical}, state::AbstractArray, mask)
     logits = p.approximator.actor(send_to_device(device(p.approximator), state))
     if !isnothing(mask)
         logits .+= ifelse.(mask, 0.0f0, typemin(Float32))
@@ -209,12 +217,12 @@ function RLBase.prob(p::PPOPolicy{<:ActorCritic,Categorical}, state::AbstractArr
     end
 end
 
-function RLBase.prob(p::PPOPolicy, env::MultiThreadEnv)
+function prob(p::PPOPolicy, env::MultiThreadEnv)
     mask = ActionStyle(env) === FULL_ACTION_SET ? legal_action_space_mask(env) : nothing
     prob(p, state(env), mask)
 end
 
-function RLBase.prob(p::PPOPolicy, env::AbstractEnv)
+function prob(p::PPOPolicy, env::AbstractEnv)
     s = state(env)
     s = Flux.unsqueeze(s, dims=ndims(s) + 1)
     mask = ActionStyle(env) === FULL_ACTION_SET ? legal_action_space_mask(env) : nothing
@@ -237,7 +245,7 @@ function (agent::Agent{<:PPOPolicy})(env::MultiThreadEnv)
     EnrichedAction(action; action_log_prob=vec(action_log_prob))
 end
 
-function RLBase.update!(
+function update!(
     p::PPOPolicy,
     t::Union{PPOTrajectory,MaskedPPOTrajectory},
     ::AbstractEnv,
@@ -368,7 +376,7 @@ function _update!(p::PPOPolicy, t::Any)
     end
 end
 
-function RLBase.update!(
+function update!(
     trajectory::Union{PPOTrajectory,MaskedPPOTrajectory},
     ::PPOPolicy,
     env::MultiThreadEnv,
