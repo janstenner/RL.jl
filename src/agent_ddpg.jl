@@ -105,7 +105,13 @@ function create_agent(;action_space, state_space, use_gpu, rng, y, p, batch_size
             memory_size = memory_size,
         ),
         trajectory = 
-            CircularArrayTrajectory(; capacity = trajectory_length, state = Float32 => size(state_space)[1], action = Float32 => size(action_space)[1], reward = Float32 => reward_size, terminal = Bool => ()),
+            CircularArrayTrajectory(;
+                capacity = trajectory_length,
+                state = Float32 => size(state_space)[1],
+                action = Float32 => size(action_space)[1],
+                reward = Float32 => reward_size,
+                terminal = Bool => ()
+            ),
     )
 end
 
