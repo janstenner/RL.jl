@@ -33,7 +33,7 @@ function create_chain(;na, ns, use_gpu, is_actor, init, copyfrom = nothing, nna_
     n
 end
 
-function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 128, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, trajectory_length = 1000, mono = false, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_envs = 2)
+function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, trajectory_length = 1000, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_envs = 1, clip1 = true)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -41,11 +41,6 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
 
     init = Flux.glorot_uniform(rng)
 
-    if mono
-        reward_size = 1
-    else
-        reward_size = size(action_space)[1]
-    end
 
     Agent(
         policy = PPOPolicy(
@@ -55,8 +50,8 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
                         Dense(size(state_space)[1], 64, relu; init = init),
                         Dense(64, 64, relu; init = init),
                     ),
-                    μ = Chain(Dense(64, 4, tanh; init = init), vec),
-                    logσ = Chain(Dense(64, 4; init = init), vec),
+                    μ = Chain(Dense(64, size(action_space)[1], tanh; init = init), vec),
+                    logσ = Chain(Dense(64, size(action_space)[1]; init = init), vec),
                 ),
                 critic = Chain(
                     Dense(size(state_space)[1], 64, relu; init = init),
@@ -70,13 +65,14 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
             clip_range = 0.2f0,
             max_grad_norm = 0.5f0,
             n_epochs = 4,
-            n_microbatches = 32,
+            n_microbatches = 4,
             actor_loss_weight = 1.0f0,
             critic_loss_weight = 0.5f0,
             entropy_loss_weight = 0.00f0,
             dist = Normal,
             rng = rng,
             update_freq = update_freq,
+            clip1 = clip1,
         ),
         trajectory = 
         CircularArrayTrajectory(;
@@ -84,7 +80,7 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
                 state = Float32 => (size(state_space)[1], n_envs),
                 action = Float32 => (size(action_space)[1], n_envs),
                 action_log_prob = Float32 => (size(action_space)[1], n_envs),
-                reward = Float32 => (reward_size, n_envs,),
+                reward = Float32 => (n_envs),
                 terminal = Bool => (n_envs,),
                 value = Float32 => (n_envs,),
         ),
@@ -120,8 +116,6 @@ that the dimensions are independent since the `GaussianNetwork` outputs a single
 `μ` and `σ` for each dimension which is used to simplify the calculations.
 """
 
-const Normal = 1
-const Categorical = 2
 
 mutable struct PPOPolicy{A<:ActorCritic,D,R} <: AbstractPolicy
     approximator::A
@@ -138,6 +132,7 @@ mutable struct PPOPolicy{A<:ActorCritic,D,R} <: AbstractPolicy
     n_random_start::Int
     update_freq::Int
     update_step::Int
+    clip1::Bool
     # for logging
     norm::Matrix{Float32}
     actor_loss::Matrix{Float32}
@@ -161,7 +156,8 @@ function PPOPolicy(;
     critic_loss_weight=0.5f0,
     entropy_loss_weight=0.01f0,
     dist=Normal,
-    rng=Random.GLOBAL_RNG
+    rng=Random.GLOBAL_RNG,
+    clip1 = true,
 )
     PPOPolicy{typeof(approximator),dist,typeof(rng)}(
         approximator,
@@ -178,6 +174,7 @@ function PPOPolicy(;
         n_random_start,
         update_freq,
         update_step,
+        clip1,
         zeros(Float32, n_microbatches, n_epochs),
         zeros(Float32, n_microbatches, n_epochs),
         zeros(Float32, n_microbatches, n_epochs),
@@ -218,21 +215,34 @@ function prob(p::PPOPolicy{<:ActorCritic,Categorical}, state::AbstractArray, mas
 end
 
 function prob(p::PPOPolicy, env::MultiThreadEnv)
-    mask = ActionStyle(env) === FULL_ACTION_SET ? legal_action_space_mask(env) : nothing
+    mask = nothing
     prob(p, state(env), mask)
 end
 
 function prob(p::PPOPolicy, env::AbstractEnv)
     s = state(env)
     s = Flux.unsqueeze(s, dims=ndims(s) + 1)
-    mask = ActionStyle(env) === FULL_ACTION_SET ? legal_action_space_mask(env) : nothing
+    mask = nothing
     prob(p, s, mask)
 end
 
-(p::PPOPolicy)(env::MultiThreadEnv) = rand.(p.rng, prob(p, env))
+function (p::PPOPolicy)(env::MultiThreadEnv)
+    result = rand.(p.rng, prob(p, env))
+    if p.clip1
+        clamp!(result, -1.0, 1.0)
+    end
+    result
+end
+
 
 # !!! https://github.com/JuliaReinforcementLearning/ReinforcementLearning.jl/pull/533/files#r728920324
-(p::PPOPolicy)(env::AbstractEnv) = rand.(p.rng, prob(p, env))
+function (p::PPOPolicy)(env::AbstractEnv)
+    result = rand.(p.rng, prob(p, env))
+    if p.clip1
+        clamp!(result, -1.0, 1.0)
+    end
+    result
+end
 
 function (agent::Agent{<:PPOPolicy})(env::MultiThreadEnv)
     dist = prob(agent.policy, env)
@@ -247,7 +257,7 @@ end
 
 function update!(
     p::PPOPolicy,
-    t::Union{PPOTrajectory,MaskedPPOTrajectory},
+    t::AbstractTrajectory,
     ::AbstractEnv,
     ::PreActStage,
 )
@@ -279,15 +289,11 @@ function _update!(p::PPOPolicy, t::Any)
     n = length(t)
     states_plus = to_device(t[:state])
 
-    if t isa MaskedPPOTrajectory
-        LAM = to_device(t[:legal_actions_mask])
-    end
 
     states_flatten_on_host = flatten_batch(select_last_dim(t[:state], 1:n))
     states_plus_values =
         reshape(send_to_host(AC.critic(flatten_batch(states_plus))), n_envs, :)
 
-    # TODO: make generalized_advantage_estimation GPU friendly
     advantages = generalized_advantage_estimation(
         t[:reward],
         states_plus_values,
@@ -307,12 +313,6 @@ function _update!(p::PPOPolicy, t::Any)
         rand_inds = shuffle!(rng, Vector(1:n_envs*n_rollout))
         for i in 1:n_microbatches
             inds = rand_inds[(i-1)*microbatch_size+1:i*microbatch_size]
-            if t isa MaskedPPOTrajectory
-                lam = select_last_dim(flatten_batch(select_last_dim(LAM, 2:n+1)), inds)
-
-            else
-                lam = nothing
-            end
 
             # s = to_device(select_last_dim(states_flatten_on_host, inds))
             # !!! we need to convert it into a continuous CuArray otherwise CUDA.jl will complain scalar indexing
@@ -341,12 +341,8 @@ function _update!(p::PPOPolicy, t::Any)
                         mean(size(logσ, 1) * (log(2.0f0π) + 1) .+ sum(logσ; dims=1)) / 2
                 else
                     # actor is assumed to return discrete logits
-                    raw_logit′ = AC.actor(s)
-                    if isnothing(lam)
-                        logit′ = raw_logit′
-                    else
-                        logit′ = raw_logit′ .+ ifelse.(lam, 0.0f0, typemin(Float32))
-                    end
+                    logit′ = AC.actor(s)
+
                     p′ = softmax(logit′)
                     log_p′ = logsoftmax(logit′)
                     log_p′ₐ = log_p′[a]
@@ -377,7 +373,7 @@ function _update!(p::PPOPolicy, t::Any)
 end
 
 function update!(
-    trajectory::Union{PPOTrajectory,MaskedPPOTrajectory},
+    trajectory::AbstractTrajectory,
     ::PPOPolicy,
     env::MultiThreadEnv,
     ::PreActStage,
@@ -387,10 +383,25 @@ function update!(
         trajectory;
         state=state(env),
         action=action.action,
-        action_log_prob=action.meta.action_log_prob
+        action_log_prob=action.action_log_prob
     )
-
-    if trajectory isa MaskedPPOTrajectory
-        push!(trajectory; legal_actions_mask=legal_action_space_mask(env))
-    end
 end
+
+
+function update!(
+    trajectory::AbstractTrajectory,
+    policy::PPOPolicy,
+    env::AbstractEnv,
+    ::PreActStage,
+    action,
+)
+    push!(
+        trajectory;
+        state=state(env),
+        action=action,
+        action_log_prob=policy.last_action_log_prob
+    )
+end
+
+
+

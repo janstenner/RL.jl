@@ -140,159 +140,39 @@ function Base.show(io::IO, t::MIME"text/markdown", env::AbstractEnv)
     show(io, t, Markdown.parse(s))
 end
 
-#####
-# testing
-#####
 
-using Test
+
+
 
 """
-Call this function after writing your customized environment to make sure that
-all the necessary interfaces are implemented correctly and consistently.
+    flatten_batch(x::AbstractArray)
+
+Merge the last two dimension.
+
+# Example
+
+```julia-repl
+julia> x = reshape(1:12, 2, 2, 3)
+2×2×3 reshape(::UnitRange{Int64}, 2, 2, 3) with eltype Int64:
+[:, :, 1] =
+ 1  3
+ 2  4
+
+[:, :, 2] =
+ 5  7
+ 6  8
+
+[:, :, 3] =
+  9  11
+ 10  12
+
+julia> flatten_batch(x)
+2×6 reshape(::UnitRange{Int64}, 2, 6) with eltype Int64:
+ 1  3  5  7   9  11
+ 2  4  6  8  10  12
+```
 """
-function test_interfaces!(env)
-    rng = Random.MersenneTwister(666)
-
-    @info "testing $(nameof(env)), you need to manually check these traits to make sure they are implemented correctly!" NumAgentStyle(
-        env,
-    ) DynamicStyle(env) ActionStyle(env) InformationStyle(env) StateStyle(env) RewardStyle(
-        env,
-    ) UtilityStyle(env) ChanceStyle(env)
-
-    @testset "copy" begin
-        X = copy(env)
-        Y = copy(env)
-        reset!(X)
-        reset!(Y)
-
-        if ChanceStyle(Y) ∉ (DETERMINISTIC, EXPLICIT_STOCHASTIC)
-            s = 888
-            Random.seed!(Y, s)
-            Random.seed!(X, s)
-        end
-
-        @test Y !== X
-
-        @test state(Y) == state(X)
-        @test action_space(Y) == action_space(X)
-        @test reward(Y) == reward(X)
-        @test is_terminated(Y) == is_terminated(X)
-
-        while !is_terminated(Y)
-            A, A′ = legal_action_space(X), legal_action_space(Y)
-            @test A == A′
-            a = rand(rng, A)
-            Y(a)
-            X(a)
-            @test state(Y) == state(X)
-            @test reward(Y) == reward(X)
-            @test is_terminated(Y) == is_terminated(X)
-        end
-    end
-
-    @testset "SingleAgent" begin
-        if NumAgentStyle(env) === SINGLE_AGENT
-            reset!(env)
-            total_reward = 0.0
-            while !is_terminated(env)
-                if StateStyle(env) isa Tuple
-                    for ss in StateStyle(env)
-                        @test state(env, ss) ∈ state_space(env, ss)
-                    end
-                end
-
-                A = legal_action_space(env)
-                if ActionStyle(env) === MINIMAL_ACTION_SET
-                    action_space(env) == legal_action_space
-                elseif ActionStyle(env) === FULL_ACTION_SET
-                    @test legal_action_space(env) ==
-                          action_space(env)[legal_action_space_mask(env)]
-                else
-                    @error "TODO:"
-                end
-
-                a = rand(rng, A)
-                @test a ∈ action_space(env)
-                env(a)
-                @test state(env) ∈ state_space(env)
-
-                total_reward += reward(env)
-            end
-            r = reward(env)  # make sure we can still get the reward no matter what the RewardStyle of the env is.
-            if RewardStyle(env) === TERMINAL_REWARD
-                @test total_reward == r
-            end
-        end
-    end
-
-    @testset "MultiAgent" begin
-        if NumAgentStyle(env) isa MultiAgent
-            reset!(env)
-            rewards = [0.0 for p in players(env)]
-            while !is_terminated(env)
-                if InformationStyle(env) === PERFECT_INFORMATION
-                    for p in players(env)
-                        @test state(env) == state(env, p)
-                    end
-                end
-                a = rand(rng, legal_action_space(env))
-                env(a)
-                for (i, p) in enumerate(players(env))
-                    @test state(env, p) ∈ state_space(env, p)
-                    rewards[i] += reward(env, p)
-                end
-            end
-            # even the game is already terminated
-            # make sure each player can still get some necessary info
-            for p in players(env)
-                state(env, p)
-                reward(env, p)
-                @test is_terminated(env)
-                # we don't need to check legal_action_space when the game is
-                # already over
-                # @test isempty(legal_action_space(env, p))
-            end
-            if RewardStyle(env) === TERMINAL_REWARD
-                for (p, r) in zip(players(env), rewards)
-                    @test r == reward(env, p)
-                end
-            end
-
-            if UtilityStyle(env) === ZERO_SUM
-                @test sum(rewards) == 0
-            elseif UtilityStyle(env) == IDENTICAL_UTILITY
-                @test all(rewards[1] .== rewards)
-            end
-        end
-    end
-
-    reset!(env)
-end
-
-function test_runnable!(env, n = 1000; rng = Random.GLOBAL_RNG)
-    @testset "random policy with $(nameof(env))" begin
-        reset!(env)
-        for _ in 1:n
-            A = legal_action_space(env)
-            a = rand(rng, A)
-            @test a in A
-
-            if ActionStyle(env) === EXPLICIT_STOCHASTIC &&
-               current_player(env) == chance_player(env)
-                @test isapprox(sum(prob(env)), 1)
-            end
-
-            S = state_space(env)
-            s = state(env)
-            @test s in S
-            env(a)
-            if is_terminated(env)
-                reset!(env)
-            end
-        end
-        reset!(env)
-    end
-end
+flatten_batch(x::AbstractArray) = reshape(x, size(x)[1:end-2]..., :)
 
 
 """
@@ -383,3 +263,107 @@ consecutive_view(cb::AbstractArray, inds::Vector{Int}, n_stack::Int, n_horizon::
             length(inds),
         ),
     )
+
+
+
+
+
+"""
+    generalized_advantage_estimation(rewards::VectorOrMatrix, values::VectorOrMatrix, γ::Number, λ::Number;kwargs...)
+
+Calculate the generalized advantage estimate started from the current step with discount rate of `γ` and a lambda for GAE-Lambda of 'λ'.
+`rewards` and 'values' can be a matrix.
+
+# Keyword arguments
+
+- `dims=:`, if `rewards` is a `Matrix`, then `dims` can only be `1` or `2`.
+- `terminal=nothing`, specify if each reward follows by a terminal. `nothing` means the game is not terminated yet. If `terminal` is provided, then the size must be the same with `rewards`.
+
+# Example
+"""
+const VectorOrMatrix = Union{AbstractMatrix,AbstractVector}
+
+function generalized_advantage_estimation(
+    rewards::VectorOrMatrix,
+    values::VectorOrMatrix,
+    γ::T,
+    λ::T;
+    kwargs...,
+) where {T<:Number}
+    res = similar(rewards, promote_type(eltype(rewards), T))
+    generalized_advantage_estimation!(res, rewards, values, γ, λ; kwargs...)
+    res
+end
+
+generalized_advantage_estimation!(
+    advantages,
+    rewards,
+    values,
+    γ,
+    λ;
+    terminal = nothing,
+    dims = :,
+) = _generalized_advantage_estimation!(advantages, rewards, values, γ, λ, terminal, dims)
+
+function _generalized_advantage_estimation!(
+    advantages::AbstractMatrix,
+    rewards::AbstractMatrix,
+    values::AbstractMatrix,
+    γ,
+    λ,
+    terminal::Nothing,
+    dims::Int,
+)
+    dims = ndims(rewards) - dims + 1
+    for (r′, r, v) in zip(
+        eachslice(advantages, dims = dims),
+        eachslice(rewards, dims = dims),
+        eachslice(values, dims = dims),
+    )
+        _generalized_advantage_estimation!(r′, r, v, γ, λ, nothing)
+    end
+end
+
+
+function _generalized_advantage_estimation!(
+    advantages::AbstractMatrix,
+    rewards::AbstractMatrix,
+    values::AbstractMatrix,
+    γ,
+    λ,
+    terminal,
+    dims::Int,
+)
+    dims = ndims(rewards) - dims + 1
+    for (r′, r, v, t) in zip(
+        eachslice(advantages, dims = dims),
+        eachslice(rewards, dims = dims),
+        eachslice(values, dims = dims),
+        eachslice(terminal, dims = dims),
+    )
+        _generalized_advantage_estimation!(r′, r, v, γ, λ, t)
+    end
+end
+
+_generalized_advantage_estimation!(
+    advantages::AbstractVector,
+    rewards::AbstractVector,
+    values::AbstractVector,
+    γ,
+    λ,
+    terminal,
+    dims::Colon,
+) = _generalized_advantage_estimation!(advantages, rewards, values, γ, λ, terminal)
+
+
+"assuming rewards and advantages are Vector"
+function _generalized_advantage_estimation!(advantages, rewards, values, γ, λ, terminal)
+    gae = 0
+    for i in length(rewards)-1:-1:1
+        is_continue = isnothing(terminal) ? true : (!terminal[i])
+        delta = rewards[i] + γ * values[i+1] * is_continue - values[i]
+        gae = delta + γ * λ * is_continue * gae
+        advantages[i] = gae
+    end
+    advantages
+end

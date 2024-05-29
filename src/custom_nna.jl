@@ -51,6 +51,7 @@ function Base.copyto!(dest::ActorCritic, src::ActorCritic)
     Flux.loadparams!(dest.critic, params(src.critic))
 end
 
+@forward ActorCritic.critic device
 
 
 

@@ -567,6 +567,7 @@ function Base.length(
         CircularArraySLARTTrajectory,
         CircularVectorSARTSATrajectory,
         ElasticSARTTrajectory,
+        Trajectory
     },
 )
     x = t[:terminal]

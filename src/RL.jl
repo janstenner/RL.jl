@@ -7,6 +7,8 @@ using LinearAlgebra
 using IntervalSets
 using DataFrames
 using Statistics
+using Distributions
+using StructArrays
 using UnicodePlots:lineplot
 using Flux
 using CUDA
@@ -15,6 +17,7 @@ using Random
 using CircularArrayBuffers
 using ElasticArrays
 using MacroTools: @forward
+using MacroTools
 using ProgressMeter
 using StableRNGs
 using Setfield: @set
@@ -48,6 +51,8 @@ include("./run.jl")
 include("./custom_nna.jl")
 include("./agent_ddpg.jl")
 include("./agent_ddpg team.jl")
+include("./multi_thread_env.jl")
+include("./agent_ppo.jl")
 
 
 

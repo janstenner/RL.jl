@@ -95,6 +95,8 @@ function update!(
     ::PreActStage,
     action,
 )
+    s = state(env)
+
     push!(trajectory[:state], s)
     push!(trajectory[:action], action)
 end
@@ -105,6 +107,8 @@ function update!(
     env::AbstractEnv,
     ::PostActStage,
 )
+    r = reward(env)
+
     push!(trajectory[:reward], r)
     push!(trajectory[:terminal], is_terminated(env))
 end
