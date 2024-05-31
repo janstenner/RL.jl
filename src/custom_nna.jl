@@ -73,6 +73,7 @@ function normlogpdf(μ, σ, x; ϵ = 1.0f-8)
     -(z .^ 2 .+ log2π) / 2.0f0 .- log.(σ .+ ϵ)
 end
 
+
 """
     GaussianNetwork(;pre=identity, μ, logσ, min_σ=0f0, max_σ=Inf32, normalizer = tanh)
 
@@ -92,6 +93,7 @@ end
 GaussianNetwork(pre, μ, logσ, normalizer=tanh) = GaussianNetwork(pre, μ, logσ, 0.0f0, Inf32, normalizer)
 
 Flux.@functor GaussianNetwork
+
 
 """
 This function is compatible with a multidimensional action space. When outputting an action, it uses the `normalizer` function to normalize it elementwise.

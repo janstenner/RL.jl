@@ -50,8 +50,8 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
                         Dense(size(state_space)[1], 64, relu; init = init),
                         Dense(64, 64, relu; init = init),
                     ),
-                    μ = Chain(Dense(64, size(action_space)[1], tanh; init = init), vec),
-                    logσ = Chain(Dense(64, size(action_space)[1]; init = init), vec),
+                    μ = Chain(Dense(64, size(action_space)[1], tanh; init = init)),
+                    logσ = Chain(Dense(64, size(action_space)[1]; init = init)),
                 ),
                 critic = Chain(
                     Dense(size(state_space)[1], 64, relu; init = init),
@@ -133,6 +133,7 @@ mutable struct PPOPolicy{A<:ActorCritic,D,R} <: AbstractPolicy
     update_freq::Int
     update_step::Int
     clip1::Bool
+    last_action_log_prob::Float32
     # for logging
     norm::Matrix{Float32}
     actor_loss::Matrix{Float32}
@@ -175,6 +176,7 @@ function PPOPolicy(;
         update_freq,
         update_step,
         clip1,
+        0.0,
         zeros(Float32, n_microbatches, n_epochs),
         zeros(Float32, n_microbatches, n_epochs),
         zeros(Float32, n_microbatches, n_epochs),
@@ -250,7 +252,7 @@ function (agent::Agent{<:PPOPolicy})(env::MultiThreadEnv)
     if ndims(action) == 2
         action_log_prob = sum(logpdf.(dist, action), dims=1)
     else
-        action_log_prob = logpdf.(dist, action)
+        action_log_prob = sum(logpdf.(dist, action))
     end
     EnrichedAction(action; action_log_prob=vec(action_log_prob))
 end
@@ -327,7 +329,7 @@ function _update!(p::PPOPolicy, t::Any)
             log_p = vec(action_log_probs)[inds]
             adv = vec(advantages)[inds]
 
-            ps = Flux.params(AC)
+            ps = Flux.params(AC.actor, AC.critic)
             gs = gradient(ps) do
                 v′ = AC.critic(s) |> vec
                 if AC.actor isa GaussianNetwork
@@ -335,7 +337,7 @@ function _update!(p::PPOPolicy, t::Any)
                     if ndims(a) == 2
                         log_p′ₐ = vec(sum(normlogpdf(μ, exp.(logσ), a), dims=1))
                     else
-                        log_p′ₐ = normlogpdf(μ, exp.(logσ), a)
+                        log_p′ₐ = sum(normlogpdf(μ, exp.(logσ), a))
                     end
                     entropy_loss =
                         mean(size(logσ, 1) * (log(2.0f0π) + 1) .+ sum(logσ; dims=1)) / 2
@@ -356,7 +358,7 @@ function _update!(p::PPOPolicy, t::Any)
                 critic_loss = mean((r .- v′) .^ 2)
                 loss = w₁ * actor_loss + w₂ * critic_loss - w₃ * entropy_loss
 
-                ignore_derivatives() do
+                ignore() do
                     p.actor_loss[i, epoch] = actor_loss
                     p.critic_loss[i, epoch] = critic_loss
                     p.entropy_loss[i, epoch] = entropy_loss
@@ -367,7 +369,9 @@ function _update!(p::PPOPolicy, t::Any)
             end
 
             p.norm[i, epoch] = clip_by_global_norm!(gs, ps, p.max_grad_norm)
-            update!(AC, gs)
+            
+            Flux.Optimise.update!(AC.optimizer, Flux.params(AC.actor), gs)
+            Flux.Optimise.update!(AC.optimizer, Flux.params(AC.critic), gs)
         end
     end
 end
