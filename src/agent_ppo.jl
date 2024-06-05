@@ -33,7 +33,7 @@ function create_chain(;na, ns, use_gpu, is_actor, init, copyfrom = nothing, nna_
     n
 end
 
-function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, trajectory_length = 1000, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_envs = 1, clip1 = true)
+function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, trajectory_length = 1000, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_envs = 1, clip1 = false)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -79,7 +79,7 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
                 capacity = update_freq,
                 state = Float32 => (size(state_space)[1], n_envs),
                 action = Float32 => (size(action_space)[1], n_envs),
-                action_log_prob = Float32 => (size(action_space)[1], n_envs),
+                action_log_prob = Float32 => (n_envs),
                 reward = Float32 => (n_envs),
                 terminal = Bool => (n_envs,),
                 value = Float32 => (n_envs,),
@@ -133,7 +133,7 @@ mutable struct PPOPolicy{A<:ActorCritic,D,R} <: AbstractPolicy
     update_freq::Int
     update_step::Int
     clip1::Bool
-    last_action_log_prob::Float32
+    last_action_log_prob::Vector{Float32}
     # for logging
     norm::Matrix{Float32}
     actor_loss::Matrix{Float32}
@@ -158,7 +158,7 @@ function PPOPolicy(;
     entropy_loss_weight=0.01f0,
     dist=Normal,
     rng=Random.GLOBAL_RNG,
-    clip1 = true,
+    clip1 = false,
 )
     PPOPolicy{typeof(approximator),dist,typeof(rng)}(
         approximator,
@@ -176,7 +176,7 @@ function PPOPolicy(;
         update_freq,
         update_step,
         clip1,
-        0.0,
+        [0.0],
         zeros(Float32, n_microbatches, n_epochs),
         zeros(Float32, n_microbatches, n_epochs),
         zeros(Float32, n_microbatches, n_epochs),
@@ -223,7 +223,7 @@ end
 
 function prob(p::PPOPolicy, env::AbstractEnv)
     s = state(env)
-    s = Flux.unsqueeze(s, dims=ndims(s) + 1)
+    # s = Flux.unsqueeze(s, dims=ndims(s) + 1)
     mask = nothing
     prob(p, s, mask)
 end
@@ -239,11 +239,16 @@ end
 
 # !!! https://github.com/JuliaReinforcementLearning/ReinforcementLearning.jl/pull/533/files#r728920324
 function (p::PPOPolicy)(env::AbstractEnv)
-    result = rand.(p.rng, prob(p, env))
+    dist = prob(p, env)
+    action = rand.(p.rng, dist)
+
+    p.last_action_log_prob = vec(sum(logpdf.(dist, action), dims=1))
+
     if p.clip1
-        clamp!(result, -1.0, 1.0)
+        clamp!(action, -1.0, 1.0)
     end
-    result
+
+    action
 end
 
 function (agent::Agent{<:PPOPolicy})(env::MultiThreadEnv)
@@ -252,7 +257,7 @@ function (agent::Agent{<:PPOPolicy})(env::MultiThreadEnv)
     if ndims(action) == 2
         action_log_prob = sum(logpdf.(dist, action), dims=1)
     else
-        action_log_prob = sum(logpdf.(dist, action))
+        action_log_prob = sum(logpdf.(dist, action), dims=1)
     end
     EnrichedAction(action; action_log_prob=vec(action_log_prob))
 end
@@ -337,7 +342,7 @@ function _update!(p::PPOPolicy, t::Any)
                     if ndims(a) == 2
                         log_p′ₐ = vec(sum(normlogpdf(μ, exp.(logσ), a), dims=1))
                     else
-                        log_p′ₐ = sum(normlogpdf(μ, exp.(logσ), a))
+                        log_p′ₐ = normlogpdf(μ, exp.(logσ), a)
                     end
                     entropy_loss =
                         mean(size(logσ, 1) * (log(2.0f0π) + 1) .+ sum(logσ; dims=1)) / 2
