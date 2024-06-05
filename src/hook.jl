@@ -73,10 +73,14 @@ function (hook::GeneralHook)(::PostEpisodeStage, agent, env)
 
     if end_successful
         push!(hook.rewards_compare, hook.reward)
-        if hook.collect_NNA && length(hook.rewards_compare) >= 1 && hook.reward >= maximum(hook.rewards_compare)
-            copyto!(hook.bestNNA, agent.policy.behavior_actor)
+        if length(hook.rewards_compare) >= 1 && hook.reward >= maximum(hook.rewards_compare)
             hook.bestreward = hook.reward
             hook.bestepisode = hook.ep
+
+            if hook.collect_NNA 
+                copyto!(hook.bestNNA, agent.policy.behavior_actor)
+            end
+
             if hook.collect_bestDF
                 hook.bestDF = copy(hook.currentDF)
             end
