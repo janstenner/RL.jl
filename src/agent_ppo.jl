@@ -1,4 +1,4 @@
-function create_chain(;na, ns, use_gpu, is_actor, init, copyfrom = nothing, nna_scale, drop_middle_layer, fun = relu)
+function create_chain(;ns, use_gpu, is_actor, init, nna_scale, drop_middle_layer, fun = relu)
     nna_size_actor = Int(floor(10 * nna_scale))
     nna_size_critic = Int(floor(20 * nna_scale))
 
@@ -6,31 +6,31 @@ function create_chain(;na, ns, use_gpu, is_actor, init, copyfrom = nothing, nna_
         if drop_middle_layer
             n = Chain(
                 Dense(ns, nna_size_actor, fun; init = init),
-                Dense(nna_size_actor, na, tanh; init = init),
             )
         else
             n = Chain(
                 Dense(ns, nna_size_actor, fun; init = init),
                 Dense(nna_size_actor, nna_size_actor, fun; init = init),
-                Dense(nna_size_actor, na, tanh; init = init),
             )
         end
     else
         if drop_middle_layer
             n = Chain(
-                Dense(ns + na, nna_size_critic, fun; init = init),
+                Dense(ns, nna_size_critic, fun; init = init),
                 Dense(nna_size_critic, 1; init = init),
             )
         else
             n = Chain(
-                Dense(ns + na, nna_size_critic, fun; init = init),
+                Dense(ns, nna_size_critic, fun; init = init),
                 Dense(nna_size_critic, nna_size_critic, fun; init = init),
                 Dense(nna_size_critic, 1; init = init),
             )
         end
     end
 
-    n
+    model = use_gpu ? n |> gpu : n
+
+    model
 end
 
 function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, trajectory_length = 1000, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_envs = 1, clip1 = false)
@@ -46,18 +46,11 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
         policy = PPOPolicy(
             approximator = ActorCritic(
                 actor = GaussianNetwork(
-                    pre = Chain(
-                        Dense(size(state_space)[1], 64, relu; init = init),
-                        Dense(64, 64, relu; init = init),
-                    ),
-                    μ = Chain(Dense(64, size(action_space)[1], tanh; init = init)),
-                    logσ = Chain(Dense(64, size(action_space)[1]; init = init)),
+                    pre = create_chain(ns = size(state_space)[1], use_gpu = false, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun),
+                    μ = Chain(Dense(Int(floor(10 * nna_scale)), size(action_space)[1], tanh; init = init)),
+                    logσ = Chain(Dense(Int(floor(10 * nna_scale)), size(action_space)[1]; init = init)),
                 ),
-                critic = Chain(
-                    Dense(size(state_space)[1], 64, relu; init = init),
-                    Dense(64, 64, relu; init = init),
-                    Dense(64, 1; init = init),
-                ),
+                critic = create_chain(ns = size(state_space)[1], use_gpu = false, is_actor = false, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic),
                 optimizer = Flux.ADAM(learning_rate),
             ),
             γ = y,
