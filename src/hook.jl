@@ -12,6 +12,7 @@ Base.@kwdef mutable struct GeneralHook <: AbstractHook
     collect_history::Bool = false
     collect_NNA::Bool = true
     collect_bestDF::Bool = true
+    collect_rewards_all_timesteps::Bool = true
 
     min_best_episode = 0
     early_success_possible = false
@@ -50,7 +51,9 @@ end
 
 function (hook::GeneralHook)(::PostActStage, agent, env)
     hook.reward += mean(reward(env))
-    push!(hook.rewards_all_timesteps, mean(reward(env)))
+    if hook.collect_rewards_all_timesteps
+        push!(hook.rewards_all_timesteps, mean(reward(env)))
+    end
 
     if hook.collect_bestDF
         tmp = DataFrame()
