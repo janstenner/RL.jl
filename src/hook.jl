@@ -39,7 +39,7 @@ end
 function (hook::GeneralHook)(::PreEpisodeStage, agent, env)
     if !(isnothing(hook.generate_random_init))
         env.y0 = hook.generate_random_init()
-        env.y = env.y0
+        env.y = deepcopy(env.y0)
 
         env.state = env.featurize(; env = env)
     end
