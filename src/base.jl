@@ -359,12 +359,21 @@ _generalized_advantage_estimation!(
 "assuming rewards and advantages are Vector"
 function _generalized_advantage_estimation!(advantages, rewards, values, γ, λ, terminal)
     gae = 0
+
+    # Bugfix for j = length(rewards)
+    j = length(rewards)
+    is_continue = isnothing(terminal) ? true : (!terminal[j])
+    delta = rewards[j] + γ * values[j] * is_continue - values[j]
+    gae = delta + γ * λ * is_continue * gae
+    advantages[j] = gae
+
     for i in length(rewards)-1:-1:1
         is_continue = isnothing(terminal) ? true : (!terminal[i])
         delta = rewards[i] + γ * values[i+1] * is_continue - values[i]
         gae = delta + γ * λ * is_continue * gae
         advantages[i] = gae
     end
+
     advantages
 end
 
