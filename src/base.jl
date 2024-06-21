@@ -363,7 +363,7 @@ function _generalized_advantage_estimation!(advantages, rewards, values, γ, λ,
     # Bugfix for j = length(rewards)
     j = length(rewards)
     is_continue = isnothing(terminal) ? true : (!terminal[j])
-    delta = rewards[j] + γ * values[j] * is_continue - values[j]
+    delta = rewards[j]
     gae = delta + γ * λ * is_continue * gae
     advantages[j] = gae
 
