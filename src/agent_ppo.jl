@@ -235,11 +235,13 @@ function (p::PPOPolicy)(env::AbstractEnv)
     dist = prob(p, env)
     action = rand.(p.rng, dist)
 
-    p.last_action_log_prob = vec(sum(logpdf.(dist, action), dims=1))
-
     if p.clip1
         clamp!(action, -1.0, 1.0)
     end
+
+    # put the last action log prob behind the clip
+    
+    p.last_action_log_prob = vec(sum(logpdf.(dist, action), dims=1))
 
     action
 end
