@@ -33,7 +33,7 @@ function create_chain(;ns, use_gpu, is_actor, init, nna_scale, drop_middle_layer
     model
 end
 
-function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, trajectory_length = 1000, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_envs = 1, clip1 = false)
+function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, trajectory_length = 1000, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -57,8 +57,8 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
             λ = p,
             clip_range = 0.2f0,
             max_grad_norm = 0.5f0,
-            n_epochs = 4,
-            n_microbatches = 4,
+            n_epochs = n_epochs,
+            n_microbatches = n_microbatches,
             actor_loss_weight = 1.0f0,
             critic_loss_weight = 0.5f0,
             entropy_loss_weight = 0.00f0,
