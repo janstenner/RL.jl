@@ -29,8 +29,6 @@ mutable struct GeneralEnv <: AbstractEnv
  
     done
 
-    oversampling
-    use_radau
 
     max_value
     check_max_value
@@ -50,8 +48,6 @@ function GeneralEnv(; te = 2.0,
                   y0 = nothing, 
                   action0 = nothing, 
                   reward = 0.0, 
-                  oversampling = 1, 
-                  use_radau = false,
                   max_value = 20.0,
                   check_max_value = "y",
                   use_gpu = false)
@@ -137,9 +133,7 @@ function GeneralEnv(; te = 2.0,
            steps, 
            time, 
            reward, 
-           done, 
-           oversampling, 
-           use_radau,
+           done,
            max_value,
            check_max_value)
 end
@@ -171,24 +165,28 @@ function (env::GeneralEnv)(action)
     
     env.p = env.prepare_action(; env = env)
 
-    if isnothing(env.do_step)
-        if env.use_radau
-            tspan = (env.time, env.time + env.dt)
-            prob = ODEProblem(env.f, env.y, tspan, env.p)
-            sol = solve(prob, RadauIIA5(), reltol=1e-8, abstol=1e-8)
-            env.y = last(sol.u)
-        else
-            dt_temp = env.dt / env.oversampling
+    env.y = env.do_step(env)
+
+    # Legacy code - use this inside of do_step in script if needed
+
+    # if isnothing(env.do_step)
+    #     if env.use_radau
+    #         tspan = (env.time, env.time + env.dt)
+    #         prob = ODEProblem(env.f, env.y, tspan, env.p)
+    #         sol = solve(prob, RadauIIA5(), reltol=1e-8, abstol=1e-8)
+    #         env.y = last(sol.u)
+    #     else
+    #         dt_temp = env.dt / env.oversampling
             
-            for i in 1:env.oversampling
-                y_old = env.y
-                env.y = env.y + 0.5 * dt_temp * env.f(;env=env)
-                env.y = y_old + dt_temp * env.f(;env=env)
-            end
-        end
-    else
-        env.y = env.do_step(env)
-    end
+    #         for i in 1:env.oversampling
+    #             y_old = env.y
+    #             env.y = env.y + 0.5 * dt_temp * env.f(;env=env)
+    #             env.y = y_old + dt_temp * env.f(;env=env)
+    #         end
+    #     end
+    # else
+    #     env.y = env.do_step(env)
+    # end
 
     env.reward = env.reward_function(env)
 
