@@ -85,6 +85,7 @@ Base.@kwdef struct GaussianNetwork{P,U,S,F}
     pre::P = identity
     μ::U
     logσ::S
+    logσ_is_head::Bool = false
     min_σ::Float32 = 0.0f0
     max_σ::Float32 = Inf32
     normalizer::F = tanh
@@ -104,8 +105,15 @@ This function is compatible with a multidimensional action space. When outputtin
 """
 function (model::GaussianNetwork)(rng::AbstractRNG, s; is_sampling::Bool=false, is_return_log_prob::Bool=false)
     x = model.pre(s)
-    μ, raw_logσ = model.μ(x), model.logσ(x)
+
+    if model.logσ_is_head
+        μ, raw_logσ = model.μ(x), model.logσ(x)
+    else
+        μ, raw_logσ = model.μ(x), model.logσ
+    end
+
     logσ = clamp.(raw_logσ, log(model.min_σ), log(model.max_σ))
+    
     if is_sampling
         σ = exp.(logσ)
         z = Zygote.ignore() do
@@ -123,38 +131,6 @@ function (model::GaussianNetwork)(rng::AbstractRNG, s; is_sampling::Bool=false, 
     end
 end
 
-"""
-    (model::GaussianNetwork)(rng::AbstractRNG, state, action_samples::Int)
-Sample `action_samples` actions from each state. Returns a 3D tensor with dimensions (action_size x action_samples x batch_size).
-`state` must be 3D tensor with dimensions (state_size x 1 x batch_size). Always returns the logpdf of each action along.
-"""
-function (model::GaussianNetwork)(rng::AbstractRNG, s, action_samples::Int)
-    x = model.pre(s)
-    μ, raw_logσ = model.μ(x), model.logσ(x)
-    logσ = clamp.(raw_logσ, log(model.min_σ), log(model.max_σ))
-
-    σ = exp.(logσ)
-    z = Zygote.ignore() do
-        noise = randn(rng, Float32, (size(μ, 1), action_samples, size(μ, 3))...)
-        model.normalizer.(μ .+ σ .* noise)
-    end
-    logp_π = sum(normlogpdf(μ, σ, z) .- (2.0f0 .* (log(2.0f0) .- z .- softplus.(-2.0f0 .* z))), dims=1)
-    return z, logp_π
-end
-
 function (model::GaussianNetwork)(state; is_sampling::Bool=false, is_return_log_prob::Bool=false)
     model(Random.GLOBAL_RNG, state; is_sampling=is_sampling, is_return_log_prob=is_return_log_prob)
-end
-
-function (model::GaussianNetwork)(state, action_samples::Int)
-    model(Random.GLOBAL_RNG, state, action_samples)
-end
-
-function (model::GaussianNetwork)(state, action)
-    x = model.pre(state)
-    μ, raw_logσ = model.μ(x), model.logσ(x)
-    logσ = clamp.(raw_logσ, log(model.min_σ), log(model.max_σ))
-    σ = exp.(logσ)
-    logp_π = sum(normlogpdf(μ, σ, action) .- (2.0f0 .* (log(2.0f0) .- action .- softplus.(-2.0f0 .* action))), dims=1)
-    return logp_π
 end
