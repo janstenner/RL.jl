@@ -110,6 +110,7 @@ function (model::GaussianNetwork)(rng::AbstractRNG, s; is_sampling::Bool=false, 
         μ, raw_logσ = model.μ(x), model.logσ(x)
     else
         μ, raw_logσ = model.μ(x), model.logσ
+        raw_logσ = repeat(raw_logσ, outer=(1,size(μ)[2]))
     end
 
     logσ = clamp.(raw_logσ, log(model.min_σ), log(model.max_σ))
