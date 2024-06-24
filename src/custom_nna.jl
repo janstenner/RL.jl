@@ -90,7 +90,7 @@ Base.@kwdef struct GaussianNetwork{P,U,S,F}
     normalizer::F = tanh
 end
 
-GaussianNetwork(pre, μ, logσ, normalizer=tanh) = GaussianNetwork(pre, μ, logσ, 0.0f0, Inf32, normalizer)
+GaussianNetwork(pre, μ, logσ, min_σ=0.0f0, max_σ=Inf32, normalizer=tanh) = GaussianNetwork(pre, μ, logσ, min_σ, max_σ, normalizer)
 
 Flux.@functor GaussianNetwork
 

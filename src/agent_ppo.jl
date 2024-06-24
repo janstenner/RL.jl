@@ -49,6 +49,7 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
                     pre = create_chain(ns = size(state_space)[1], use_gpu = false, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun),
                     μ = Chain(Dense(Int(floor(10 * nna_scale)), size(action_space)[1], tanh; init = init)),
                     logσ = Chain(Dense(Int(floor(10 * nna_scale)), size(action_space)[1]; init = init)),
+                    max_σ = 3.0f0
                 ),
                 critic = create_chain(ns = size(state_space)[1], use_gpu = false, is_actor = false, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic),
                 optimizer = Flux.ADAM(learning_rate),
