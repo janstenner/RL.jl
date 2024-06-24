@@ -33,7 +33,7 @@ function create_chain(;ns, use_gpu, is_actor, init, nna_scale, drop_middle_layer
     model
 end
 
-function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, trajectory_length = 1000, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4)
+function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, trajectory_length = 1000, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -66,6 +66,7 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
             rng = rng,
             update_freq = update_freq,
             clip1 = clip1,
+            normalize_advantage = normalize_advantage
         ),
         trajectory = 
         CircularArrayTrajectory(;
@@ -126,6 +127,7 @@ mutable struct PPOPolicy{A<:ActorCritic,D,R} <: AbstractPolicy
     update_freq::Int
     update_step::Int
     clip1::Bool
+    normalize_advantage::Bool
     last_action_log_prob::Vector{Float32}
     # for logging
     norm::Matrix{Float32}
@@ -152,6 +154,7 @@ function PPOPolicy(;
     dist=Normal,
     rng=Random.GLOBAL_RNG,
     clip1 = false,
+    normalize_advantage = normalize_advantage
 )
     PPOPolicy{typeof(approximator),dist,typeof(rng)}(
         approximator,
@@ -169,6 +172,7 @@ function PPOPolicy(;
         update_freq,
         update_step,
         clip1,
+        normalize_advantage,
         [0.0],
         zeros(Float32, n_microbatches, n_epochs),
         zeros(Float32, n_microbatches, n_epochs),
@@ -307,10 +311,13 @@ function _update!(p::PPOPolicy, t::Any)
     returns = to_device(advantages .+ select_last_dim(states_plus_values, 1:n_rollout))
     advantages = to_device(advantages)
 
+    if p.normalize_advantage
+        advantages = (advantages .- mean(advantages)) ./ (std(advantages) + 1e-8)
+    end
+
     actions_flatten = flatten_batch(select_last_dim(t[:action], 1:n))
     action_log_probs = select_last_dim(to_device(t[:action_log_prob]), 1:n)
 
-    # TODO: normalize advantage
     for epoch in 1:n_epochs
         rand_inds = shuffle!(rng, Vector(1:n_envs*n_rollout))
         for i in 1:n_microbatches
