@@ -71,7 +71,7 @@ function (hook::GeneralHook)(::PostEpisodeStage, agent, env)
     if hook.early_success_possible
         end_successful = hook.ep >= hook.min_best_episode ? true : false
     else
-        end_successful = (env.time >= env.t && hook.ep >= hook.min_best_episode) ? true : false
+        end_successful = (env.time >= env.te && hook.ep >= hook.min_best_episode) ? true : false
     end
 
     if end_successful
