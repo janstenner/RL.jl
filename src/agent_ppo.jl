@@ -41,7 +41,7 @@ function create_logσ(logσ_is_head, nna_scale, na, init)
     end
 end
 
-function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, trajectory_length = 1000, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_head = false)
+function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, trajectory_length = 1000, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_head = false, start_steps = -1, start_policy = nothing)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -76,7 +76,9 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
             rng = rng,
             update_freq = update_freq,
             clip1 = clip1,
-            normalize_advantage = normalize_advantage
+            normalize_advantage = normalize_advantage,
+            start_steps = start_steps,
+            start_policy = start_policy
         ),
         trajectory = 
         CircularArrayTrajectory(;
@@ -138,6 +140,8 @@ mutable struct PPOPolicy{A<:ActorCritic,D,R} <: AbstractPolicy
     update_step::Int
     clip1::Bool
     normalize_advantage::Bool
+    start_steps
+    start_policy
     last_action_log_prob::Vector{Float32}
     # for logging
     norm::Matrix{Float32}
@@ -164,7 +168,9 @@ function PPOPolicy(;
     dist=Normal,
     rng=Random.GLOBAL_RNG,
     clip1 = false,
-    normalize_advantage = normalize_advantage
+    normalize_advantage = normalize_advantage,
+    start_steps = -1,
+    start_policy = nothing
 )
     PPOPolicy{typeof(approximator),dist,typeof(rng)}(
         approximator,
@@ -183,6 +189,8 @@ function PPOPolicy(;
         update_step,
         clip1,
         normalize_advantage,
+        start_steps,
+        start_policy,
         [0.0],
         zeros(Float32, n_microbatches, n_epochs),
         zeros(Float32, n_microbatches, n_epochs),
@@ -246,29 +254,39 @@ end
 
 # !!! https://github.com/JuliaReinforcementLearning/ReinforcementLearning.jl/pull/533/files#r728920324
 function (p::PPOPolicy)(env::AbstractEnv)
-    dist = prob(p, env)
-    action = rand.(p.rng, dist)
 
-    if p.clip1
-        clamp!(action, -1.0, 1.0)
+    if p.update_step <= p.start_steps
+        p.start_policy(env)
+    else
+        dist = prob(p, env)
+        action = rand.(p.rng, dist)
+
+        if p.clip1
+            clamp!(action, -1.0, 1.0)
+        end
+
+        # put the last action log prob behind the clip
+        
+        p.last_action_log_prob = vec(sum(logpdf.(dist, action), dims=1))
+
+        action
     end
-
-    # put the last action log prob behind the clip
-    
-    p.last_action_log_prob = vec(sum(logpdf.(dist, action), dims=1))
-
-    action
 end
 
 function (agent::Agent{<:PPOPolicy})(env::MultiThreadEnv)
-    dist = prob(agent.policy, env)
-    action = rand.(agent.policy.rng, dist)
-    if ndims(action) == 2
-        action_log_prob = sum(logpdf.(dist, action), dims=1)
+
+    if agent.policy.update_step <= policy.start_steps
+        agent.policy.start_policy(env)
     else
-        action_log_prob = sum(logpdf.(dist, action), dims=1)
+        dist = prob(agent.policy, env)
+        action = rand.(agent.policy.rng, dist)
+        if ndims(action) == 2
+            action_log_prob = sum(logpdf.(dist, action), dims=1)
+        else
+            action_log_prob = sum(logpdf.(dist, action), dims=1)
+        end
+        EnrichedAction(action; action_log_prob=vec(action_log_prob))
     end
-    EnrichedAction(action; action_log_prob=vec(action_log_prob))
 end
 
 function update!(
