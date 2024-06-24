@@ -33,7 +33,7 @@ function create_chain(;ns, use_gpu, is_actor, init, nna_scale, drop_middle_layer
     model
 end
 
-function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, trajectory_length = 1000, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true)
+function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, trajectory_length = 1000, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_head = false)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -50,7 +50,7 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
                     μ = Chain(Dense(Int(floor(10 * nna_scale)), size(action_space)[1], tanh; init = init)),
                     # logσ = Chain(Dense(Int(floor(10 * nna_scale)), size(action_space)[1]; init = init)),
                     logσ = Matrix(Matrix(Float32.(zeros(size(action_space)[1]))')'),
-                    logσ_is_head = false,
+                    logσ_is_head = logσ_is_head,
                     max_σ = 30.0f0
                 ),
                 critic = create_chain(ns = size(state_space)[1], use_gpu = false, is_actor = false, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic),
