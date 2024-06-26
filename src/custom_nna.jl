@@ -85,7 +85,7 @@ Base.@kwdef struct GaussianNetwork{P,U,S,F}
     pre::P = identity
     μ::U
     logσ::S
-    logσ_is_head::Bool = false
+    logσ_is_network::Bool = false
     min_σ::Float32 = 0.0f0
     max_σ::Float32 = Inf32
     normalizer::F = tanh
@@ -106,7 +106,7 @@ This function is compatible with a multidimensional action space. When outputtin
 function (model::GaussianNetwork)(rng::AbstractRNG, s; is_sampling::Bool=false, is_return_log_prob::Bool=false)
     x = model.pre(s)
 
-    if model.logσ_is_head
+    if model.logσ_is_network
         μ, raw_logσ = model.μ(x), model.logσ(x)
     else
         μ, raw_logσ = model.μ(x), model.logσ
