@@ -50,11 +50,11 @@ function create_chain(;ns, na, use_gpu, is_actor, init, nna_scale, drop_middle_l
     model
 end
 
-function create_logσ(;logσ_is_network, ns, na, use_gpu, init, nna_scale, drop_middle_layer, fun = relu)
+function create_logσ(;logσ_is_network, ns, na, use_gpu, init, nna_scale, drop_middle_layer, fun = relu, max_σ = 0.3)
     if logσ_is_network
         return create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = false)
     else
-        return Matrix(Matrix(Float32.(zeros(na))')')
+        return Matrix(Matrix(Float32.(ones(na) .* log(max_σ))')')
     end
 end
 
@@ -74,7 +74,7 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
             approximator = ActorCritic(
                 actor = GaussianNetwork(
                     μ = create_chain(ns = ns, na = na, use_gpu = false, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun),
-                    logσ = create_logσ(logσ_is_network = logσ_is_network, ns = ns, na = na, use_gpu = false, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun),
+                    logσ = create_logσ(logσ_is_network = logσ_is_network, ns = ns, na = na, use_gpu = false, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, max_σ = max_σ),
                     logσ_is_network = logσ_is_network,
                     max_σ = max_σ
                 ),
