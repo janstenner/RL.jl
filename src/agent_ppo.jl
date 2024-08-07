@@ -1,17 +1,34 @@
-function create_chain(;ns, use_gpu, is_actor, init, nna_scale, drop_middle_layer, fun = relu)
+function create_chain(;ns, na, use_gpu, is_actor, init, nna_scale, drop_middle_layer, fun = relu, tanh_end = true)
     nna_size_actor = Int(floor(10 * nna_scale))
     nna_size_critic = Int(floor(20 * nna_scale))
 
     if is_actor
-        if drop_middle_layer
-            n = Chain(
-                Dense(ns, nna_size_actor, fun; init = init),
-            )
+        if tanh_end
+            if drop_middle_layer
+                n = Chain(
+                    Dense(ns, nna_size_actor, fun; init = init),
+                    Dense(nna_size_actor, na, tanh; init = init)
+                )
+            else
+                n = Chain(
+                    Dense(ns, nna_size_actor, fun; init = init),
+                    Dense(nna_size_actor, nna_size_actor, fun; init = init),
+                    Dense(nna_size_actor, na, tanh; init = init)
+                )
+            end
         else
-            n = Chain(
-                Dense(ns, nna_size_actor, fun; init = init),
-                Dense(nna_size_actor, nna_size_actor, fun; init = init),
-            )
+            if drop_middle_layer
+                n = Chain(
+                    Dense(ns, nna_size_actor, fun; init = init),
+                    Dense(nna_size_actor, na; init = init)
+                )
+            else
+                n = Chain(
+                    Dense(ns, nna_size_actor, fun; init = init),
+                    Dense(nna_size_actor, nna_size_actor, fun; init = init),
+                    Dense(nna_size_actor, na; init = init)
+                )
+            end
         end
     else
         if drop_middle_layer
@@ -33,15 +50,15 @@ function create_chain(;ns, use_gpu, is_actor, init, nna_scale, drop_middle_layer
     model
 end
 
-function create_logσ(logσ_is_head, nna_scale, na, init)
-    if logσ_is_head
-        return Chain(Dense(Int(floor(10 * nna_scale)), na; init = init))
+function create_logσ(;logσ_is_network, ns, na, use_gpu, init, nna_scale, drop_middle_layer, fun = relu, max_σ = 0.3)
+    if logσ_is_network
+        return create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = false)
     else
-        return Matrix(Matrix(Float32.(zeros(na))')')
+        return Matrix(Matrix(Float32.(ones(na) .* log(max_σ))')')
     end
 end
 
-function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, trajectory_length = 1000, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_head = false, start_steps = -1, start_policy = nothing)
+function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, trajectory_length = 1000, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -49,18 +66,19 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
 
     init = Flux.glorot_uniform(rng)
 
+    ns = size(state_space)[1]
+    na = size(action_space)[1]
 
     Agent(
         policy = PPOPolicy(
             approximator = ActorCritic(
                 actor = GaussianNetwork(
-                    pre = create_chain(ns = size(state_space)[1], use_gpu = false, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun),
-                    μ = Chain(Dense(Int(floor(10 * nna_scale)), size(action_space)[1], tanh; init = init)),
-                    logσ = create_logσ(logσ_is_head, nna_scale, size(action_space)[1], init),
-                    logσ_is_head = logσ_is_head,
-                    max_σ = 30.0f0
+                    μ = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun),
+                    logσ = create_logσ(logσ_is_network = logσ_is_network, ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, max_σ = max_σ),
+                    logσ_is_network = logσ_is_network,
+                    max_σ = max_σ
                 ),
-                critic = create_chain(ns = size(state_space)[1], use_gpu = false, is_actor = false, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic),
+                critic = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = false, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic),
                 optimizer = Flux.ADAM(learning_rate),
             ),
             γ = y,
@@ -69,9 +87,9 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
             max_grad_norm = 0.5f0,
             n_epochs = n_epochs,
             n_microbatches = n_microbatches,
-            actor_loss_weight = 1.0f0,
-            critic_loss_weight = 0.5f0,
-            entropy_loss_weight = 0.00f0,
+            actor_loss_weight = actor_loss_weight,
+            critic_loss_weight = critic_loss_weight,
+            entropy_loss_weight = entropy_loss_weight,
             dist = Normal,
             rng = rng,
             update_freq = update_freq,
