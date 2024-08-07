@@ -22,6 +22,7 @@ using ProgressMeter
 using StableRNGs
 using Setfield: @set
 using Zygote
+using cuDNN
 
 
 

@@ -104,13 +104,16 @@ This function is compatible with a multidimensional action space. When outputtin
 - `is_return_log_prob::Bool=false`, whether to calculate the conditional probability of getting actions in the given state.
 """
 function (model::GaussianNetwork)(rng::AbstractRNG, s; is_sampling::Bool=false, is_return_log_prob::Bool=false)
+
     x = model.pre(s)
 
     if model.logσ_is_network
         μ, raw_logσ = model.μ(x), model.logσ(x)
     else
         μ, raw_logσ = model.μ(x), model.logσ
-        raw_logσ = repeat(raw_logσ, outer=(1,size(μ)[2]))
+        # the first method leads to Cuda complaining about scalar indexing
+        # raw_logσ = repeat(raw_logσ, outer=(1,size(μ)[2]))
+        raw_logσ = hcat([raw_logσ for i in 1:size(μ)[2]]...)
     end
 
     logσ = clamp.(raw_logσ, log(model.min_σ), log(model.max_σ))
@@ -128,7 +131,7 @@ function (model::GaussianNetwork)(rng::AbstractRNG, s; is_sampling::Bool=false, 
             return z
         end
     else
-        return μ, logσ
+        return μ, deepcopy(logσ)
     end
 end
 
