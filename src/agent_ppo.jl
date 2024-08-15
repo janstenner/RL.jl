@@ -65,7 +65,7 @@ function create_logσ(;logσ_is_network, ns, na, use_gpu, init, nna_scale, drop_
     return res
 end
 
-function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, trajectory_length = 1000, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0)
+function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, trajectory_length = 1000, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -86,7 +86,7 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
                     max_σ = max_σ
                 ),
                 critic = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = false, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic),
-                optimizer = Flux.ADAM(learning_rate),
+                optimizer = OptimiserChain(ClipGrad(clip_grad), ADAM(learning_rate)),
             ) : approximator,
             γ = y,
             λ = p,
@@ -103,7 +103,8 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
             clip1 = clip1,
             normalize_advantage = normalize_advantage,
             start_steps = start_steps,
-            start_policy = start_policy
+            start_policy = start_policy,
+            target_kl = target_kl,
         ),
         trajectory = 
         CircularArrayTrajectory(;
@@ -113,7 +114,7 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
                 action_log_prob = Float32 => (n_envs),
                 reward = Float32 => (n_envs),
                 terminal = Bool => (n_envs,),
-                value = Float32 => (n_envs,),
+                next_values = Float32 => (n_envs,),
         ),
     )
 end
@@ -167,13 +168,8 @@ mutable struct PPOPolicy{A<:ActorCritic,D,R} <: AbstractPolicy
     normalize_advantage::Bool
     start_steps
     start_policy
+    target_kl
     last_action_log_prob::Vector{Float32}
-    # for logging
-    norm::Matrix{Float32}
-    actor_loss::Matrix{Float32}
-    critic_loss::Matrix{Float32}
-    entropy_loss::Matrix{Float32}
-    loss::Matrix{Float32}
 end
 
 function PPOPolicy(;
@@ -195,7 +191,8 @@ function PPOPolicy(;
     clip1 = false,
     normalize_advantage = normalize_advantage,
     start_steps = -1,
-    start_policy = nothing
+    start_policy = nothing,
+    target_kl = 100.0
 )
     PPOPolicy{typeof(approximator),dist,typeof(rng)}(
         approximator,
@@ -216,12 +213,8 @@ function PPOPolicy(;
         normalize_advantage,
         start_steps,
         start_policy,
+        target_kl,
         [0.0],
-        zeros(Float32, n_microbatches, n_epochs),
-        zeros(Float32, n_microbatches, n_epochs),
-        zeros(Float32, n_microbatches, n_epochs),
-        zeros(Float32, n_microbatches, n_epochs),
-        zeros(Float32, n_microbatches, n_epochs),
     )
 end
 
@@ -350,12 +343,13 @@ function _update!(p::PPOPolicy, t::Any)
 
 
     states_flatten_on_host = flatten_batch(select_last_dim(t[:state], 1:n))
-    states_plus_values =
-        reshape(send_to_host(AC.critic(flatten_batch(states_plus))), n_envs, :)
+
+    states_plus_values = reshape(send_to_host(AC.critic(flatten_batch(states_plus))), n_envs, :)
 
     advantages = generalized_advantage_estimation(
         t[:reward],
         states_plus_values,
+        t[:next_values],
         γ,
         λ;
         dims=2,
@@ -364,16 +358,16 @@ function _update!(p::PPOPolicy, t::Any)
     returns = to_device(advantages .+ select_last_dim(states_plus_values, 1:n_rollout))
     advantages = to_device(advantages)
 
-    if p.normalize_advantage
-        advantages = (advantages .- mean(advantages)) ./ (std(advantages) + 1e-8)
-    end
-
     actions_flatten = flatten_batch(select_last_dim(t[:action], 1:n))
     action_log_probs = select_last_dim(to_device(t[:action_log_prob]), 1:n)
 
+    stop_update = false
+
     for epoch in 1:n_epochs
+
         rand_inds = shuffle!(rng, Vector(1:n_envs*n_rollout))
         for i in 1:n_microbatches
+
             inds = rand_inds[(i-1)*microbatch_size+1:i*microbatch_size]
 
             # s = to_device(select_last_dim(states_flatten_on_host, inds))
@@ -389,11 +383,25 @@ function _update!(p::PPOPolicy, t::Any)
             log_p = vec(action_log_probs)[inds]
             adv = vec(advantages)[inds]
 
-            ps = Flux.params(AC.actor, AC.critic)
-            gs = gradient(ps) do
-                v′ = AC.critic(s) |> vec
-                if AC.actor isa GaussianNetwork
-                    μ, logσ = AC.actor(s)
+            clamp!(log_p, log(1e-8), 0.0) # clamp old_prob to 1e-5 to avoid inf
+
+            if p.normalize_advantage
+                adv = (adv .- mean(adv)) ./ clamp(std(adv), 1e-8, 1000.0)
+            end
+
+            if isnothing(AC.actor_state_tree)
+                AC.actor_state_tree = Flux.setup(AC.optimizer, AC.actor)
+            end
+
+            if isnothing(AC.critic_state_tree)
+                AC.critic_state_tree = Flux.setup(AC.optimizer, AC.critic)
+            end
+
+            g_actor, g_critic = Flux.gradient(AC.actor, AC.critic) do actor, critic
+                v′ = critic(s) |> vec
+                if actor isa GaussianNetwork
+                    μ, logσ = actor(s)
+                    
                     if ndims(a) == 2
                         log_p′ₐ = vec(sum(normlogpdf(μ, exp.(logσ), a), dims=1))
                     else
@@ -403,7 +411,7 @@ function _update!(p::PPOPolicy, t::Any)
                         mean(size(logσ, 1) * (log(2.0f0π) + 1) .+ sum(logσ; dims=1)) / 2
                 else
                     # actor is assumed to return discrete logits
-                    logit′ = AC.actor(s)
+                    logit′ = actor(s)
 
                     p′ = softmax(logit′)
                     log_p′ = logsoftmax(logit′)
@@ -411,6 +419,16 @@ function _update!(p::PPOPolicy, t::Any)
                     entropy_loss = -sum(p′ .* log_p′) * 1 // size(p′, 2)
                 end
                 ratio = exp.(log_p′ₐ .- log_p)
+
+                ignore() do
+                    approx_kl_div = mean((ratio .- 1) - log.(ratio)) |> send_to_host
+
+                    if approx_kl_div > p.target_kl
+                        println("Target KL overstepped: $(approx_kl_div)")
+                        stop_update = true
+                    end
+                end
+
                 surr1 = ratio .* adv
                 surr2 = clamp.(ratio, 1.0f0 - clip_range, 1.0f0 + clip_range) .* adv
 
@@ -418,20 +436,20 @@ function _update!(p::PPOPolicy, t::Any)
                 critic_loss = mean((r .- v′) .^ 2)
                 loss = w₁ * actor_loss + w₂ * critic_loss - w₃ * entropy_loss
 
-                ignore() do
-                    p.actor_loss[i, epoch] = actor_loss
-                    p.critic_loss[i, epoch] = critic_loss
-                    p.entropy_loss[i, epoch] = entropy_loss
-                    p.loss[i, epoch] = loss
-                end
-
                 loss
             end
-
-            p.norm[i, epoch] = clip_by_global_norm!(gs, ps, p.max_grad_norm)
             
-            Flux.Optimise.update!(AC.optimizer, Flux.params(AC.actor), gs)
-            Flux.Optimise.update!(AC.optimizer, Flux.params(AC.critic), gs)
+            if !stop_update
+                Flux.update!(AC.actor_state_tree, AC.actor, g_actor)
+                Flux.update!(AC.critic_state_tree, AC.critic, g_critic)
+            else
+                break
+            end
+
+        end
+
+        if stop_update
+            break
         end
     end
 end
@@ -468,4 +486,15 @@ function update!(
 end
 
 
+function update!(
+    trajectory::AbstractTrajectory,
+    policy::PPOPolicy,
+    env::AbstractEnv,
+    ::PostActStage,
+)
+    r = reward(env)
 
+    push!(trajectory[:reward], r)
+    push!(trajectory[:terminal], is_terminated(env))
+    push!(trajectory[:next_values], policy.approximator.critic(send_to_device(device(policy.approximator), env.state)) |> send_to_host)
+end
