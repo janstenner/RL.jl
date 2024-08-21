@@ -35,18 +35,18 @@ copyto!(dest::CustomNeuralNetworkApproximator, src::CustomNeuralNetworkApproxima
 
 The `actor` part must return logits (*Do not use softmax in the last layer!*), and the `critic` part must return a state value.
 """
-Base.@kwdef mutable struct ActorCritic{A,C,O}
+Base.@kwdef mutable struct ActorCritic{A,C}
     actor::A
     critic::C
-    optimizer::O = ADAM()
+    optimizer_actor = ADAM()
+    optimizer_critic = ADAM()
     actor_state_tree = nothing
     critic_state_tree = nothing
 end
 
-functor(x::ActorCritic) =
-    (actor=x.actor, critic=x.critic), y -> ActorCritic(y.actor, y.critic, x.optimizer)
+# functor(x::ActorCritic) = (actor=x.actor, critic=x.critic), y -> ActorCritic(y.actor, y.critic, x.optimizer)
 
-update!(app::ActorCritic, gs) = Flux.Optimise.update!(app.optimizer, params(app), gs)
+#update!(app::ActorCritic, gs) = Flux.Optimise.update!(app.optimizer, params(app), gs)
 
 function Base.copyto!(dest::ActorCritic, src::ActorCritic)
     Flux.loadparams!(dest.actor, params(src.actor))

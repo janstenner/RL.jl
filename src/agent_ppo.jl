@@ -86,7 +86,8 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
                     max_σ = max_σ
                 ),
                 critic = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = false, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic),
-                optimizer = OptimiserChain(ClipGrad(clip_grad), ADAM(learning_rate)),
+                optimizer_actor = OptimiserChain(ClipGrad(clip_grad), ADAM(learning_rate)),
+                optimizer_critic = OptimiserChain(ClipGrad(clip_grad), ADAM(learning_rate)),
             ) : approximator,
             γ = y,
             λ = p,
@@ -285,7 +286,15 @@ function (p::PPOPolicy)(env::AbstractEnv)
 
         # put the last action log prob behind the clip
         
-        p.last_action_log_prob = vec(sum(logpdf.(dist, action), dims=1))
+        ###p.last_action_log_prob = vec(sum(logpdf.(dist, action), dims=1))
+
+        if ndims(action) == 2
+            log_p = vec(sum(normlogpdf(dist.μ, dist.σ, action), dims=1))
+        else
+            log_p = normlogpdf(dist.μ, dist.σ, action)
+        end
+
+        p.last_action_log_prob = log_p
 
         action
     end
@@ -339,23 +348,25 @@ function _update!(p::PPOPolicy, t::Any)
     microbatch_size = n_envs * n_rollout ÷ n_microbatches
 
     n = length(t)
-    states_plus = to_device(t[:state])
+    states = to_device(t[:state])
 
 
     states_flatten_on_host = flatten_batch(select_last_dim(t[:state], 1:n))
 
-    states_plus_values = reshape(send_to_host(AC.critic(flatten_batch(states_plus))), n_envs, :)
+    values = reshape(send_to_host(AC.critic(flatten_batch(states))), n_envs, :)
+
+    # TODO values and next values with n_envs > 1 ???
 
     advantages = generalized_advantage_estimation(
         t[:reward],
-        states_plus_values,
+        values,
         t[:next_values],
         γ,
         λ;
         dims=2,
         terminal=t[:terminal]
     )
-    returns = to_device(advantages .+ select_last_dim(states_plus_values, 1:n_rollout))
+    returns = to_device(advantages .+ select_last_dim(values, 1:n_rollout))
     advantages = to_device(advantages)
 
     actions_flatten = flatten_batch(select_last_dim(t[:action], 1:n))
@@ -390,11 +401,11 @@ function _update!(p::PPOPolicy, t::Any)
             end
 
             if isnothing(AC.actor_state_tree)
-                AC.actor_state_tree = Flux.setup(AC.optimizer, AC.actor)
+                AC.actor_state_tree = Flux.setup(AC.optimizer_actor, AC.actor)
             end
 
             if isnothing(AC.critic_state_tree)
-                AC.critic_state_tree = Flux.setup(AC.optimizer, AC.critic)
+                AC.critic_state_tree = Flux.setup(AC.optimizer_critic, AC.critic)
             end
 
             g_actor, g_critic = Flux.gradient(AC.actor, AC.critic) do actor, critic
