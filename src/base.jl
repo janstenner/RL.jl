@@ -359,7 +359,7 @@ _generalized_advantage_estimation!(
     γ,
     λ,
     terminal,
-    dims::Colon,
+    dims,
 ) = _generalized_advantage_estimation!(advantages, rewards, values, next_values, γ, λ, terminal)
 
 
