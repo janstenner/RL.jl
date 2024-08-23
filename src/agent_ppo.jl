@@ -115,7 +115,7 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
                 action_log_prob = Float32 => (n_envs),
                 reward = Float32 => (n_envs),
                 terminal = Bool => (n_envs,),
-                next_values = Float32 => (n_envs,),
+                next_values = Float32 => (1, n_envs),
         ),
     )
 end
@@ -408,13 +408,12 @@ function _update!(p::PPOPolicy, t::Any)
     states_flatten_on_host = flatten_batch(select_last_dim(t[:state], 1:n))
 
     values = reshape(send_to_host(AC.critic(flatten_batch(states))), n_envs, :)
-
-    # TODO values and next values with n_envs > 1 ???
+    next_values = reshape(flatten_batch(t[:next_values]), n_envs, :)
 
     advantages = generalized_advantage_estimation(
         t[:reward],
         values,
-        t[:next_values],
+        next_values,
         γ,
         λ;
         dims=2,

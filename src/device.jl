@@ -21,8 +21,6 @@ device(x::Tuple{}) = nothing
 device(x::NamedTuple{(),Tuple{}}) = nothing
 device(x::AbstractArray) = device(parent(x))
 
-device(x::AbstractEnv) = Val(:cpu)  # TODO: we may support gpu later
-
 function device(x::Random.AbstractRNG)
     if x isa CUDA.CURAND.RNG
         device()
