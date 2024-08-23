@@ -1,4 +1,4 @@
-function create_chain(;ns, na, use_gpu, is_actor, init, nna_scale, drop_middle_layer, fun = relu, tanh_end = true)
+function create_chain(;ns, na, use_gpu, is_actor, init, nna_scale, drop_middle_layer, fun = relu, tanh_end = false)
     nna_size_actor = Int(floor(10 * nna_scale))
     nna_size_critic = Int(floor(20 * nna_scale))
 
@@ -50,15 +50,14 @@ function create_chain(;ns, na, use_gpu, is_actor, init, nna_scale, drop_middle_l
     model
 end
 
-function create_logσ(;logσ_is_network, ns, na, use_gpu, init, nna_scale, drop_middle_layer, fun = relu, max_σ = 0.3)
+function create_logσ(;logσ_is_network, ns, na, use_gpu, init, nna_scale, drop_middle_layer, fun = relu, start_logσ = 0.0)
 
     res = nothing
 
     if logσ_is_network
         res = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = false)
     else
-        #res = Matrix(Matrix(Float32.(ones(na) .* log(max_σ))')')
-        res = Matrix(Matrix(Float32.(zeros(na))')')
+        res = Matrix(Matrix(Float32.(ones(na) .* start_logσ)')')
     end
 
     res = use_gpu ? res |> gpu : res
@@ -66,7 +65,7 @@ function create_logσ(;logσ_is_network, ns, na, use_gpu, init, nna_scale, drop_
     return res
 end
 
-function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, trajectory_length = 1000, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0)
+function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -81,8 +80,8 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
         policy = PPOPolicy(
             approximator = isnothing(approximator) ? ActorCritic(
                 actor = GaussianNetwork(
-                    μ = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun),
-                    logσ = create_logσ(logσ_is_network = logσ_is_network, ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, max_σ = max_σ),
+                    μ = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = tanh_end),
+                    logσ = create_logσ(logσ_is_network = logσ_is_network, ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, start_logσ = start_logσ),
                     logσ_is_network = logσ_is_network,
                     max_σ = max_σ
                 ),
