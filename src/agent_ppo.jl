@@ -488,7 +488,7 @@ function _update!(p::PPOPolicy, t::Any)
                     approx_kl_div = mean((ratio .- 1) - log.(ratio)) |> send_to_host
 
                     if approx_kl_div > p.target_kl
-                        println("Target KL overstepped: $(approx_kl_div)")
+                        println("Target KL overstepped: $(approx_kl_div) at epoch $(epoch), batch $(i)")
                         stop_update = true
                     end
                 end
