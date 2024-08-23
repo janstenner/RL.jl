@@ -57,7 +57,8 @@ function create_logσ(;logσ_is_network, ns, na, use_gpu, init, nna_scale, drop_
     if logσ_is_network
         res = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = false)
     else
-        res = Matrix(Matrix(Float32.(ones(na) .* log(max_σ))')')
+        #res = Matrix(Matrix(Float32.(ones(na) .* log(max_σ))')')
+        res = Matrix(Matrix(Float32.(zeros(na))')')
     end
 
     res = use_gpu ? res |> gpu : res
