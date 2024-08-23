@@ -316,11 +316,61 @@ function (agent::Agent{<:PPOPolicy})(env::MultiThreadEnv)
     end
 end
 
+
+
+
+
+
+function update!(
+    trajectory::AbstractTrajectory,
+    ::PPOPolicy,
+    env::MultiThreadEnv,
+    ::PreActStage,
+    action::EnrichedAction,
+)
+    push!(
+        trajectory;
+        state=state(env),
+        action=action.action,
+        action_log_prob=action.action_log_prob
+    )
+end
+
+
+function update!(
+    trajectory::AbstractTrajectory,
+    policy::PPOPolicy,
+    env::AbstractEnv,
+    ::PreActStage,
+    action,
+)
+    push!(
+        trajectory;
+        state=state(env),
+        action=action,
+        action_log_prob=policy.last_action_log_prob
+    )
+end
+
+
+function update!(
+    trajectory::AbstractTrajectory,
+    policy::PPOPolicy,
+    env::AbstractEnv,
+    ::PostActStage,
+)
+    r = reward(env)
+
+    push!(trajectory[:reward], r)
+    push!(trajectory[:terminal], is_terminated(env))
+    push!(trajectory[:next_values], policy.approximator.critic(send_to_device(device(policy.approximator), env.state)) |> send_to_host)
+end
+
 function update!(
     p::PPOPolicy,
     t::AbstractTrajectory,
     ::AbstractEnv,
-    ::PreActStage,
+    ::PostActStage,
 )
     length(t) == 0 && return  # in the first update, only state & action are inserted into trajectory
     p.update_step += 1
@@ -328,6 +378,10 @@ function update!(
         _update!(p, t)
     end
 end
+
+
+
+
 
 function _update!(p::PPOPolicy, t::Any)
     rng = p.rng
@@ -465,47 +519,3 @@ function _update!(p::PPOPolicy, t::Any)
     end
 end
 
-function update!(
-    trajectory::AbstractTrajectory,
-    ::PPOPolicy,
-    env::MultiThreadEnv,
-    ::PreActStage,
-    action::EnrichedAction,
-)
-    push!(
-        trajectory;
-        state=state(env),
-        action=action.action,
-        action_log_prob=action.action_log_prob
-    )
-end
-
-
-function update!(
-    trajectory::AbstractTrajectory,
-    policy::PPOPolicy,
-    env::AbstractEnv,
-    ::PreActStage,
-    action,
-)
-    push!(
-        trajectory;
-        state=state(env),
-        action=action,
-        action_log_prob=policy.last_action_log_prob
-    )
-end
-
-
-function update!(
-    trajectory::AbstractTrajectory,
-    policy::PPOPolicy,
-    env::AbstractEnv,
-    ::PostActStage,
-)
-    r = reward(env)
-
-    push!(trajectory[:reward], r)
-    push!(trajectory[:terminal], is_terminated(env))
-    push!(trajectory[:next_values], policy.approximator.critic(send_to_device(device(policy.approximator), env.state)) |> send_to_host)
-end
