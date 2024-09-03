@@ -359,7 +359,7 @@ function update!(
     env::AbstractEnv,
     ::PostActStage,
 )
-    r = reward(env)
+    r = reward(env)[:]
 
     push!(trajectory[:reward], r)
     push!(trajectory[:terminal], is_terminated(env))
