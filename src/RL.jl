@@ -24,6 +24,7 @@ using Setfield: @set
 using Zygote
 using cuDNN
 using Transformers
+using Transformers.Layers
 using ChainRulesCore
 using Static
 
@@ -57,6 +58,7 @@ include("./agent_ddpg.jl")
 include("./agent_ddpg team.jl")
 include("./multi_thread_env.jl")
 include("./agent_ppo.jl")
+include("./agent_mat.jl")
 
 
 

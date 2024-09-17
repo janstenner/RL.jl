@@ -137,6 +137,61 @@ end
 
 
 
+Base.@kwdef struct MATEncoder
+    embedding
+    position_encoding
+    nl
+    dropout
+    block
+    head
+end
+
+Flux.@functor MATEncoder
+
+function (st::MATEncoder)(x)
+    x = st.embedding(x)              # (dm, N, B)
+    N = size(x, 2)
+    x = x .+ st.position_encoding(1:N) # (dm, N, B)
+
+    x = st.nl(x)
+
+    x = st.dropout(x)                # (dm, N, B)
+
+    x = st.block(x)     # (dm, N, B)
+    rep = x[:hidden_state]
+
+    v = st.head(rep)                   # (vocab_size, N, B)
+    rep, v
+end
+
+
+Base.@kwdef struct MATDecoder
+    embedding
+    position_encoding
+    nl
+    dropout
+    block
+    head
+end
+
+Flux.@functor MATDecoder
+
+function (st::MATDecoder)(x, obs_rep)
+    x = st.embedding(x)              # (dm, N, B)
+    N = size(x, 2)
+    x = x .+ st.position_encoding(1:N) # (dm, N, B)
+
+    x = st.nl(x)
+
+    x = st.dropout(x)                # (dm, N, B)
+
+    x = st.block(x, obs_rep, Masks.CausalMask(), Masks.CausalMask())     # (dm, N, B)
+    
+    x = x[:hidden_state]
+
+    x = st.head(x)                   # (vocab_size, N, B)
+    x
+end
 
 
 
@@ -148,7 +203,12 @@ end
 
 
 
-function create_chain(;ns, na, use_gpu, is_actor, init, nna_scale, drop_middle_layer, fun = relu, tanh_end = false)
+
+
+
+
+
+function create_chain_mat(;ns, na, use_gpu, is_actor, init, nna_scale, drop_middle_layer, fun = relu, tanh_end = false)
     nna_size_actor = Int(floor(10 * nna_scale))
     nna_size_critic = Int(floor(20 * nna_scale))
 
@@ -200,12 +260,12 @@ function create_chain(;ns, na, use_gpu, is_actor, init, nna_scale, drop_middle_l
     model
 end
 
-function create_logσ(;logσ_is_network, ns, na, use_gpu, init, nna_scale, drop_middle_layer, fun = relu, start_logσ = 0.0)
+function create_logσ_mat(;logσ_is_network, ns, na, use_gpu, init, nna_scale, drop_middle_layer, fun = relu, start_logσ = 0.0)
 
     res = nothing
 
     if logσ_is_network
-        res = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = false)
+        res = create_chain_mat(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = false)
     else
         res = Matrix(Matrix(Float32.(ones(na) .* start_logσ)')')
     end
@@ -215,7 +275,7 @@ function create_logσ(;logσ_is_network, ns, na, use_gpu, init, nna_scale, drop_
     return res
 end
 
-function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0)
+function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -227,15 +287,15 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
     na = size(action_space)[1]
 
     Agent(
-        policy = PPOPolicy(
+        policy = MATPolicy(
             approximator = isnothing(approximator) ? ActorCritic(
                 actor = GaussianNetwork(
-                    μ = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = tanh_end),
-                    logσ = create_logσ(logσ_is_network = logσ_is_network, ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, start_logσ = start_logσ),
+                    μ = create_chain_mat(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = tanh_end),
+                    logσ = create_logσ_mat(logσ_is_network = logσ_is_network, ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, start_logσ = start_logσ),
                     logσ_is_network = logσ_is_network,
                     max_σ = max_σ
                 ),
-                critic = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = false, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic),
+                critic = create_chain_mat(ns = ns, na = na, use_gpu = use_gpu, is_actor = false, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic),
                 optimizer_actor = OptimiserChain(ClipNorm(clip_grad), ADAM(learning_rate)),
                 optimizer_critic = OptimiserChain(ClipNorm(clip_grad), ADAM(learning_rate)),
             ) : approximator,
@@ -273,7 +333,7 @@ end
 
 
 """
-    PPOPolicy(;kwargs)
+    MATPolicy(;kwargs)
 
 # Keyword arguments
 
@@ -300,7 +360,7 @@ that the dimensions are independent since the `GaussianNetwork` outputs a single
 """
 
 
-mutable struct PPOPolicy{A<:ActorCritic,D,R} <: AbstractPolicy
+mutable struct MATPolicy{A<:ActorCritic,D,R} <: AbstractPolicy
     approximator::A
     γ::Float32
     λ::Float32
@@ -323,7 +383,7 @@ mutable struct PPOPolicy{A<:ActorCritic,D,R} <: AbstractPolicy
     last_action_log_prob::Vector{Float32}
 end
 
-function PPOPolicy(;
+function MATPolicy(;
     approximator,
     update_freq,
     n_random_start=0,
@@ -345,7 +405,7 @@ function PPOPolicy(;
     start_policy = nothing,
     target_kl = 100.0
 )
-    PPOPolicy{typeof(approximator),dist,typeof(rng)}(
+    MATPolicy{typeof(approximator),dist,typeof(rng)}(
         approximator,
         γ,
         λ,
@@ -370,7 +430,7 @@ function PPOPolicy(;
 end
 
 function prob(
-    p::PPOPolicy{<:ActorCritic{<:GaussianNetwork},Normal},
+    p::MATPolicy{<:ActorCritic{<:GaussianNetwork},Normal},
     state::AbstractArray,
     mask,
 )
@@ -384,7 +444,7 @@ function prob(
     end
 end
 
-function prob(p::PPOPolicy{<:ActorCritic,Categorical}, state::AbstractArray, mask)
+function prob(p::MATPolicy{<:ActorCritic,Categorical}, state::AbstractArray, mask)
     logits = p.approximator.actor(send_to_device(device(p.approximator), state))
     if !isnothing(mask)
         logits .+= ifelse.(mask, 0.0f0, typemin(Float32))
@@ -400,19 +460,19 @@ function prob(p::PPOPolicy{<:ActorCritic,Categorical}, state::AbstractArray, mas
     end
 end
 
-function prob(p::PPOPolicy, env::MultiThreadEnv)
+function prob(p::MATPolicy, env::MultiThreadEnv)
     mask = nothing
     prob(p, state(env), mask)
 end
 
-function prob(p::PPOPolicy, env::AbstractEnv)
+function prob(p::MATPolicy, env::AbstractEnv)
     s = state(env)
     # s = Flux.unsqueeze(s, dims=ndims(s) + 1)
     mask = nothing
     prob(p, s, mask)
 end
 
-function (p::PPOPolicy)(env::MultiThreadEnv)
+function (p::MATPolicy)(env::MultiThreadEnv)
     result = rand.(p.rng, prob(p, env))
     if p.clip1
         clamp!(result, -1.0, 1.0)
@@ -422,7 +482,7 @@ end
 
 
 # !!! https://github.com/JuliaReinforcementLearning/ReinforcementLearning.jl/pull/533/files#r728920324
-function (p::PPOPolicy)(env::AbstractEnv)
+function (p::MATPolicy)(env::AbstractEnv)
 
     if p.update_step <= p.start_steps
         p.start_policy(env)
@@ -450,7 +510,7 @@ function (p::PPOPolicy)(env::AbstractEnv)
     end
 end
 
-function (agent::Agent{<:PPOPolicy})(env::MultiThreadEnv)
+function (agent::Agent{<:MATPolicy})(env::MultiThreadEnv)
 
     if agent.policy.update_step <= policy.start_steps
         agent.policy.start_policy(env)
@@ -473,7 +533,7 @@ end
 
 function update!(
     trajectory::AbstractTrajectory,
-    ::PPOPolicy,
+    ::MATPolicy,
     env::MultiThreadEnv,
     ::PreActStage,
     action::EnrichedAction,
@@ -489,7 +549,7 @@ end
 
 function update!(
     trajectory::AbstractTrajectory,
-    policy::PPOPolicy,
+    policy::MATPolicy,
     env::AbstractEnv,
     ::PreActStage,
     action,
@@ -505,7 +565,7 @@ end
 
 function update!(
     trajectory::AbstractTrajectory,
-    policy::PPOPolicy,
+    policy::MATPolicy,
     env::AbstractEnv,
     ::PostActStage,
 )
@@ -517,7 +577,7 @@ function update!(
 end
 
 function update!(
-    p::PPOPolicy,
+    p::MATPolicy,
     t::AbstractTrajectory,
     ::AbstractEnv,
     ::PostActStage,
@@ -533,7 +593,7 @@ end
 
 
 
-function _update!(p::PPOPolicy, t::Any)
+function _update!(p::MATPolicy, t::Any)
     rng = p.rng
     AC = p.approximator
     γ = p.γ
