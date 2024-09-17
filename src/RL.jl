@@ -23,6 +23,9 @@ using StableRNGs
 using Setfield: @set
 using Zygote
 using cuDNN
+using Transformers
+using ChainRulesCore
+using Static
 
 
 
