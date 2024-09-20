@@ -60,6 +60,9 @@ struct CustomPostNormResidual{L, N} <: Transformers.Layers.LayerStruct
 end
 Flux.@functor CustomPostNormResidual
 
+argument_names(b::CustomPostNormResidual) = argument_names(b.layer.layer)
+argument_names(b::Transformers.Layers.PostNormResidual) = Transformers.Layers.argument_names(b)
+
 function (postnr::CustomPostNormResidual)(nt::NamedTuple)
     y = Transformers.Layers.apply_on_namedtuple(postnr.layer, nt)
     #hidden_state = y.hidden_state + nt.hidden_state
@@ -84,7 +87,7 @@ argument_names(b::CustomTransformerDecoderBlock) = Base.merge_names(
 Transformers.Layers.argument_names(b::CustomTransformerDecoderBlock) = argument_names(b)
 
 (b::CustomTransformerDecoderBlock)(nt::NamedTuple) =
-    apply_on_namedtuple(b.feedforward, apply_on_namedtuple(b.crossattention, apply_on_namedtuple(b.attention, nt)))
+    Transformers.Layers.apply_on_namedtuple(b.feedforward, Transformers.Layers.apply_on_namedtuple(b.crossattention, Transformers.Layers.apply_on_namedtuple(b.attention, nt)))
 
 
 CustomTransformerDecoderBlock(
@@ -157,10 +160,10 @@ function (st::MATEncoder)(x)
 
     x = st.dropout(x)                # (dm, N, B)
 
-    x = st.block(x)     # (dm, N, B)
+    x = st.block(x, nothing)     # (dm, N, B)
     rep = x[:hidden_state]
 
-    v = st.head(rep)                   # (vocab_size, N, B)
+    v = st.head(rep)                   # (1, N, B)
     rep, v
 end
 
@@ -172,6 +175,10 @@ Base.@kwdef struct MATDecoder
     dropout
     block
     head
+    logσ
+    logσ_is_network::Bool = false
+    min_σ::Float32 = 0.0f0
+    max_σ::Float32 = Inf32
 end
 
 Flux.@functor MATDecoder
@@ -189,8 +196,23 @@ function (st::MATDecoder)(x, obs_rep)
     
     x = x[:hidden_state]
 
-    x = st.head(x)                   # (vocab_size, N, B)
-    x
+    x = st.head(x)                   # (1, N, B)
+
+    if st.logσ_is_network
+        raw_logσ = logσ(obs_rep)
+    else
+        if ndims(x) >= 2
+            # TODO: Make it GPU friendly again (CUDA.fill or like Flux Dense Layer does it with bias - Linear Layer with freezing)
+            #raw_logσ = hcat([raw_logσ for i in 1:size(μ)[2]]...)
+            raw_logσ = send_to_device(device(st.logσ), Float32.(ones(size(x)))) .* st.logσ
+        else
+            raw_logσ = st.logσ[:]
+        end
+    end
+
+    logσ = clamp.(raw_logσ, log(st.min_σ), log(st.max_σ))
+
+    return x, logσ
 end
 
 
@@ -275,7 +297,7 @@ function create_logσ_mat(;logσ_is_network, ns, na, use_gpu, init, nna_scale, d
     return res
 end
 
-function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0)
+function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = relu, fun_critic = nothing, tanh_end = false, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -286,19 +308,50 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     ns = size(state_space)[1]
     na = size(action_space)[1]
 
+    dim_model = 64
+    block_num = 1
+    head_num = 4
+    head_dim = Int(floor(dim_model/head_num))
+    ffn_dim = 32
+    drop_out = 0.1
+    context_size = n_actors
+
+    encoder = MATEncoder(
+        embedding = Dense(ns, dim_model, relu, bias = false),
+        position_encoding = Embedding(context_size => dim_model),
+        nl = LayerNorm(dim_model),
+        dropout = Dropout(drop_out),
+        block = Transformer(TransformerBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out),
+        head = Dense(dim_model, 1),
+    )
+
+    decoder = MATDecoder(
+        embedding = Dense(na, dim_model, relu, bias = false),
+        position_encoding = Embedding(context_size => dim_model),
+        nl = LayerNorm(dim_model),
+        dropout = Dropout(drop_out),
+        block = Transformer(CustomTransformerDecoderBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out),
+        head = Dense(dim_model, na),
+        logσ = create_logσ_mat(logσ_is_network = logσ_is_network, ns = dim_model, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, start_logσ = start_logσ),
+        logσ_is_network = logσ_is_network,
+        max_σ = max_σ
+    )
+
+    encoder_optimizer = OptimiserChain(ClipNorm(clip_grad), ADAM(learning_rate))
+    decoder_optimizer = OptimiserChain(ClipNorm(clip_grad), ADAM(learning_rate))
+
+    encoder_state_tree = Flux.setup(encoder_optimizer, encoder)
+    decoder_state_tree = Flux.setup(decoder_optimizer, decoder)
+
     Agent(
         policy = MATPolicy(
-            approximator = isnothing(approximator) ? ActorCritic(
-                actor = GaussianNetwork(
-                    μ = create_chain_mat(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = tanh_end),
-                    logσ = create_logσ_mat(logσ_is_network = logσ_is_network, ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, start_logσ = start_logσ),
-                    logσ_is_network = logσ_is_network,
-                    max_σ = max_σ
-                ),
-                critic = create_chain_mat(ns = ns, na = na, use_gpu = use_gpu, is_actor = false, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic),
-                optimizer_actor = OptimiserChain(ClipNorm(clip_grad), ADAM(learning_rate)),
-                optimizer_critic = OptimiserChain(ClipNorm(clip_grad), ADAM(learning_rate)),
-            ) : approximator,
+            encoder = encoder,
+            decoder = decoder,
+            encoder_optimizer = encoder_optimizer,
+            decoder_optimizer = decoder_optimizer,
+            encoder_state_tree = encoder_state_tree,
+            decoder_state_tree = decoder_state_tree,
+            n_actors = n_actors,
             γ = y,
             λ = p,
             clip_range = 0.2f0,
@@ -308,7 +361,6 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
             actor_loss_weight = actor_loss_weight,
             critic_loss_weight = critic_loss_weight,
             entropy_loss_weight = entropy_loss_weight,
-            dist = Normal,
             rng = rng,
             update_freq = update_freq,
             clip1 = clip1,
@@ -320,145 +372,68 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
         trajectory = 
         CircularArrayTrajectory(;
                 capacity = update_freq,
-                state = Float32 => (size(state_space)[1], n_envs),
-                action = Float32 => (size(action_space)[1], n_envs),
-                action_log_prob = Float32 => (n_envs),
-                reward = Float32 => (n_envs),
-                terminal = Bool => (n_envs,),
-                next_values = Float32 => (1, n_envs),
+                state = Float32 => (size(state_space)[1], n_actors),
+                action = Float32 => (size(action_space)[1], n_actors),
+                action_log_prob = Float32 => (n_actors),
+                reward = Float32 => (n_actors),
+                terminal = Bool => (n_actors,),
+                values = Float32 => (1, n_actors),
         ),
     )
 end
 
 
 
-"""
-    MATPolicy(;kwargs)
 
-# Keyword arguments
-
-- `approximator`,
-- `γ = 0.99f0`,
-- `λ = 0.95f0`,
-- `clip_range = 0.2f0`,
-- `max_grad_norm = 0.5f0`,
-- `n_microbatches = 4`,
-- `n_epochs = 4`,
-- `actor_loss_weight = 1.0f0`,
-- `critic_loss_weight = 0.5f0`,
-- `entropy_loss_weight = 0.01f0`,
-- `dist = Categorical`,
-- `rng = Random.GLOBAL_RNG`,
-
-If `dist` is set to `Categorical`, it means it will only work
-on environments of discrete actions. To work with environments of continuous
-actions `dist` should be set to `Normal` and the `actor` in the `approximator`
-should be a `GaussianNetwork`. Using it with a `GaussianNetwork` supports 
-multi-dimensional action spaces, though it only supports it under the assumption
-that the dimensions are independent since the `GaussianNetwork` outputs a single
-`μ` and `σ` for each dimension which is used to simplify the calculations.
-"""
-
-
-mutable struct MATPolicy{A<:ActorCritic,D,R} <: AbstractPolicy
-    approximator::A
-    γ::Float32
-    λ::Float32
-    clip_range::Float32
-    max_grad_norm::Float32
-    n_microbatches::Int
-    n_epochs::Int
-    actor_loss_weight::Float32
-    critic_loss_weight::Float32
-    entropy_loss_weight::Float32
-    rng::R
-    n_random_start::Int
-    update_freq::Int
-    update_step::Int
-    clip1::Bool
-    normalize_advantage::Bool
-    start_steps
-    start_policy
-    target_kl
-    last_action_log_prob::Vector{Float32}
-end
-
-function MATPolicy(;
-    approximator,
-    update_freq,
-    n_random_start=0,
-    update_step=0,
-    γ=0.99f0,
-    λ=0.95f0,
-    clip_range=0.2f0,
-    max_grad_norm=0.5f0,
-    n_microbatches=4,
-    n_epochs=4,
-    actor_loss_weight=1.0f0,
-    critic_loss_weight=0.5f0,
-    entropy_loss_weight=0.01f0,
-    dist=Normal,
-    rng=Random.GLOBAL_RNG,
-    clip1 = false,
-    normalize_advantage = normalize_advantage,
-    start_steps = -1,
-    start_policy = nothing,
+Base.@kwdef mutable struct MATPolicy <: AbstractPolicy
+    encoder
+    decoder
+    encoder_optimizer
+    decoder_optimizer
+    encoder_state_tree
+    decoder_state_tree
+    n_actors::Int = 0
+    γ::Float32 = 0.99f0
+    λ::Float32 = 0.95f0
+    clip_range::Float32 = 0.2f0
+    max_grad_norm::Float32 = 0.5f0
+    n_microbatches::Int = 4
+    n_epochs::Int = 4
+    actor_loss_weight::Float32 = 1.0f0
+    critic_loss_weight::Float32 = 0.5f0
+    entropy_loss_weight::Float32 = 0.0f0
+    rng = StableRNG()
+    update_freq::Int = 200
+    update_step::Int = 0
+    clip1::Bool = false
+    normalize_advantage::Bool = true
+    start_steps = -1
+    start_policy = nothing
     target_kl = 100.0
-)
-    MATPolicy{typeof(approximator),dist,typeof(rng)}(
-        approximator,
-        γ,
-        λ,
-        clip_range,
-        max_grad_norm,
-        n_microbatches,
-        n_epochs,
-        actor_loss_weight,
-        critic_loss_weight,
-        entropy_loss_weight,
-        rng,
-        n_random_start,
-        update_freq,
-        update_step,
-        clip1,
-        normalize_advantage,
-        start_steps,
-        start_policy,
-        target_kl,
-        [0.0],
-    )
+    last_action_log_prob::Vector{Float32} = [0.0]
+    next_values::Vector{Float32} = [0.0]
 end
+
 
 function prob(
-    p::MATPolicy{<:ActorCritic{<:GaussianNetwork},Normal},
+    p::MATPolicy,
     state::AbstractArray,
     mask,
 )
-    if p.update_step < p.n_random_start
-        @error "todo"
-    else
-        μ, logσ =
-            p.approximator.actor(send_to_device(device(p.approximator), state)) |>
-            send_to_host
-        StructArray{Normal}((μ, exp.(logσ)))
+    obs_rep, val = p.encoder(state)
+
+    μ, logσ = p.decoder(zeros(Float32,1,1), obs_rep[:,1])
+
+    for n in 2:p.n_actors
+        newμ, newlogσ = p.decoder(cat(zeros(Float32,1,1,1), μ, dims=2), obs_rep[:,1:n])
+
+        μ = cat(μ, newμ[:,end,:], dims=2)
+        logσ = cat(logσ, newlogσ[:,end,:], dims=2)
     end
+
+    StructArray{Normal}((μ, exp.(logσ)))
 end
 
-function prob(p::MATPolicy{<:ActorCritic,Categorical}, state::AbstractArray, mask)
-    logits = p.approximator.actor(send_to_device(device(p.approximator), state))
-    if !isnothing(mask)
-        logits .+= ifelse.(mask, 0.0f0, typemin(Float32))
-    end
-    logits = logits |> softmax |> send_to_host
-    if p.update_step < p.n_random_start
-        [
-            Categorical(fill(1 / length(x), length(x)); check_args=false) for
-            x in eachcol(logits)
-        ]
-    else
-        [Categorical(x; check_args=false) for x in eachcol(logits)]
-    end
-end
 
 function prob(p::MATPolicy, env::MultiThreadEnv)
     mask = nothing
@@ -481,7 +456,6 @@ function (p::MATPolicy)(env::MultiThreadEnv)
 end
 
 
-# !!! https://github.com/JuliaReinforcementLearning/ReinforcementLearning.jl/pull/533/files#r728920324
 function (p::MATPolicy)(env::AbstractEnv)
 
     if p.update_step <= p.start_steps
@@ -504,7 +478,7 @@ function (p::MATPolicy)(env::AbstractEnv)
             log_p = normlogpdf(dist.μ, dist.σ, action)
         end
 
-        p.last_action_log_prob = log_p
+        p.last_action_log_prob = log_p[:]
 
         action
     end
@@ -560,6 +534,10 @@ function update!(
         action=action,
         action_log_prob=policy.last_action_log_prob
     )
+
+    obs_rep, values = policy.encoder(send_to_device(device(policy.encoder), env.state)) |> send_to_host
+
+    push!(trajectory[:values], values)
 end
 
 
@@ -571,9 +549,11 @@ function update!(
 )
     r = reward(env)[:]
 
+    next_obs_rep, next_values = policy.encoder(send_to_device(device(policy.encoder), env.state)) |> send_to_host
+
     push!(trajectory[:reward], r)
     push!(trajectory[:terminal], is_terminated(env))
-    push!(trajectory[:next_values], policy.approximator.critic(send_to_device(device(policy.approximator), env.state)) |> send_to_host)
+    policy.next_values = next_values[:]
 end
 
 function update!(
@@ -595,7 +575,6 @@ end
 
 function _update!(p::MATPolicy, t::Any)
     rng = p.rng
-    AC = p.approximator
     γ = p.γ
     λ = p.λ
     n_epochs = p.n_epochs
@@ -604,21 +583,18 @@ function _update!(p::MATPolicy, t::Any)
     w₁ = p.actor_loss_weight
     w₂ = p.critic_loss_weight
     w₃ = p.entropy_loss_weight
-    D = device(AC)
+    D = device(p.encoder)
     to_device(x) = send_to_device(D, x)
 
-    n_envs, n_rollout = size(t[:terminal])
-    @assert n_envs * n_rollout % n_microbatches == 0 "size mismatch"
-    microbatch_size = n_envs * n_rollout ÷ n_microbatches
+    n_actors, n_rollout = size(t[:terminal])
+    @assert n_rollout % n_microbatches == 0 "size mismatch"
+    microbatch_size = n_rollout ÷ n_microbatches
 
     n = length(t)
     states = to_device(t[:state])
 
-
-    states_flatten_on_host = flatten_batch(select_last_dim(t[:state], 1:n))
-
-    values = reshape(send_to_host(AC.critic(flatten_batch(states))), n_envs, :)
-    next_values = reshape(flatten_batch(t[:next_values]), n_envs, :)
+    values = reshape(flatten_batch(t[:values]), n_actors, :)
+    next_values = cat(values[:,2:end], p.next_values, dims=2)
 
     advantages = generalized_advantage_estimation(
         t[:reward],
@@ -632,30 +608,28 @@ function _update!(p::MATPolicy, t::Any)
     returns = to_device(advantages .+ select_last_dim(values, 1:n_rollout))
     advantages = to_device(advantages)
 
-    actions_flatten = flatten_batch(select_last_dim(t[:action], 1:n))
-    action_log_probs = select_last_dim(to_device(t[:action_log_prob]), 1:n)
+    actions = to_device(t[:action])
+    action_log_probs = t[:action_log_prob]
+
+    action_log_probs = reshape(action_log_probs, 1, size(action_log_probs)[1], size(action_log_probs)[2])
 
     stop_update = false
 
     for epoch in 1:n_epochs
 
-        rand_inds = shuffle!(rng, Vector(1:n_envs*n_rollout))
+        rand_inds = shuffle!(rng, Vector(1:n_rollout))
         for i in 1:n_microbatches
 
             inds = rand_inds[(i-1)*microbatch_size+1:i*microbatch_size]
 
-            # s = to_device(select_last_dim(states_flatten_on_host, inds))
-            # !!! we need to convert it into a continuous CuArray otherwise CUDA.jl will complain scalar indexing
-            s = to_device(collect(select_last_dim(states_flatten_on_host, inds)))
-            a = to_device(collect(select_last_dim(actions_flatten, inds)))
+            global s, a, r, log_p, adv
 
-            if eltype(a) === Int
-                a = CartesianIndex.(a, 1:length(a))
-            end
+            s = to_device(collect(select_last_dim(states, inds)))
+            a = to_device(collect(select_last_dim(actions, inds)))
 
-            r = vec(returns)[inds]
-            log_p = vec(action_log_probs)[inds]
-            adv = vec(advantages)[inds]
+            r = select_last_dim(returns, inds)
+            log_p = select_last_dim(action_log_probs, inds)
+            adv = select_last_dim(advantages, inds)
 
             clamp!(log_p, log(1e-8), 0.0) # clamp old_prob to 1e-5 to avoid inf
 
@@ -663,35 +637,21 @@ function _update!(p::MATPolicy, t::Any)
                 adv = (adv .- mean(adv)) ./ clamp(std(adv), 1e-8, 1000.0)
             end
 
-            if isnothing(AC.actor_state_tree)
-                AC.actor_state_tree = Flux.setup(AC.optimizer_actor, AC.actor)
-            end
 
-            if isnothing(AC.critic_state_tree)
-                AC.critic_state_tree = Flux.setup(AC.optimizer_critic, AC.critic)
-            end
+            g_encoder, g_decoder = Flux.gradient(p.encoder, p.decoder) do encoder, decoder
+                global obs_rep, v′, temp_act, μ, logσ, log_p′ₐ, ratio
 
-            g_actor, g_critic = Flux.gradient(AC.actor, AC.critic) do actor, critic
-                v′ = critic(s) |> vec
-                if actor isa GaussianNetwork
-                    μ, logσ = actor(s)
-                    
-                    if ndims(a) == 2
-                        log_p′ₐ = vec(sum(normlogpdf(μ, exp.(logσ), a), dims=1))
-                    else
-                        log_p′ₐ = normlogpdf(μ, exp.(logσ), a)
-                    end
-                    entropy_loss =
-                        mean(size(logσ, 1) * (log(2.0f0π) + 1) .+ sum(logσ; dims=1)) / 2
-                else
-                    # actor is assumed to return discrete logits
-                    logit′ = actor(s)
+                obs_rep, v′ = encoder(s)
 
-                    p′ = softmax(logit′)
-                    log_p′ = logsoftmax(logit′)
-                    log_p′ₐ = log_p′[a]
-                    entropy_loss = -sum(p′ .* log_p′) * 1 // size(p′, 2)
-                end
+                #parallel act
+                temp_act = cat(zeros(Float32,1,1,size(a)[3]),a[:,1:end-1,:],dims=2)
+                μ, logσ = decoder(temp_act, obs_rep)
+                
+                log_p′ₐ = sum(normlogpdf(μ, exp.(logσ), a), dims=1)
+
+                entropy_loss = mean(size(logσ, 1) * (log(2.0f0π) + 1) .+ sum(logσ; dims=1)) / 2
+                
+
                 ratio = exp.(log_p′ₐ .- log_p)
 
                 ignore() do
@@ -702,6 +662,9 @@ function _update!(p::MATPolicy, t::Any)
                         stop_update = true
                     end
                 end
+
+                adv = reshape(adv, 1, size(adv)[1], size(adv)[2])
+                r = reshape(r, 1, size(r)[1], size(r)[2])
 
                 surr1 = ratio .* adv
                 surr2 = clamp.(ratio, 1.0f0 - clip_range, 1.0f0 + clip_range) .* adv
@@ -714,8 +677,8 @@ function _update!(p::MATPolicy, t::Any)
             end
             
             if !stop_update
-                Flux.update!(AC.actor_state_tree, AC.actor, g_actor)
-                Flux.update!(AC.critic_state_tree, AC.critic, g_critic)
+                Flux.update!(p.encoder_state_tree, p.encoder, g_encoder)
+                Flux.update!(p.decoder_state_tree, p.decoder, g_decoder)
             else
                 break
             end
