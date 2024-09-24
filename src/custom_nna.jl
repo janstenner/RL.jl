@@ -118,7 +118,7 @@ function (model::GaussianNetwork)(rng::AbstractRNG, s; is_sampling::Bool=false, 
         if ndims(μ) >= 2
             # TODO: Make it GPU friendly again (CUDA.fill or like Flux Dense Layer does it with bias - Linear Layer with freezing)
             #raw_logσ = hcat([raw_logσ for i in 1:size(μ)[2]]...)
-            raw_logσ = send_to_device(device(model.logσ), ones(1,size(μ)[2])) .* model.logσ
+            raw_logσ = send_to_device(device(model.logσ), ones(Float32,1,size(μ)[2])) .* model.logσ
         else
             raw_logσ = raw_logσ[:]
         end

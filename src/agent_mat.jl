@@ -312,7 +312,7 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     block_num = 1
     head_num = 4
     head_dim = Int(floor(dim_model/head_num))
-    ffn_dim = 32
+    ffn_dim = 120
     drop_out = 0.1
     context_size = n_actors
 
@@ -337,8 +337,8 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
         max_σ = max_σ
     )
 
-    encoder_optimizer = OptimiserChain(ClipNorm(clip_grad), ADAM(learning_rate))
-    decoder_optimizer = OptimiserChain(ClipNorm(clip_grad), ADAM(learning_rate))
+    encoder_optimizer = OptimiserChain(ClipNorm(clip_grad), ADAM(learning_rate, (0.99, 0.99)))
+    decoder_optimizer = OptimiserChain(ClipNorm(clip_grad), ADAM(learning_rate, (0.99, 0.99)))
 
     encoder_state_tree = Flux.setup(encoder_optimizer, encoder)
     decoder_state_tree = Flux.setup(decoder_optimizer, decoder)
@@ -355,7 +355,6 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
             γ = y,
             λ = p,
             clip_range = 0.2f0,
-            max_grad_norm = 0.5f0,
             n_epochs = n_epochs,
             n_microbatches = n_microbatches,
             actor_loss_weight = actor_loss_weight,
@@ -396,7 +395,6 @@ Base.@kwdef mutable struct MATPolicy <: AbstractPolicy
     γ::Float32 = 0.99f0
     λ::Float32 = 0.95f0
     clip_range::Float32 = 0.2f0
-    max_grad_norm::Float32 = 0.5f0
     n_microbatches::Int = 4
     n_epochs::Int = 4
     actor_loss_weight::Float32 = 1.0f0
@@ -420,15 +418,18 @@ function prob(
     state::AbstractArray,
     mask,
 )
-    obs_rep, val = p.encoder(state)
+    na = size(p.decoder.embedding.weight)[2]
+    batch_size = length(size(state)) == 3 ? size(state)[3] : 1
 
-    μ, logσ = p.decoder(zeros(Float32,1,1), obs_rep[:,1])
+    obsrep, val = p.encoder(state)
+
+    μ, logσ = p.decoder(zeros(Float32,na,1,batch_size), obsrep[:,1:1,:])
 
     for n in 2:p.n_actors
-        newμ, newlogσ = p.decoder(cat(zeros(Float32,1,1,1), μ, dims=2), obs_rep[:,1:n])
+        newμ, newlogσ = p.decoder(cat(zeros(Float32,na,1,batch_size), μ, dims=2), obsrep[:,1:n,:])
 
-        μ = cat(μ, newμ[:,end,:], dims=2)
-        logσ = cat(logσ, newlogσ[:,end,:], dims=2)
+        μ = cat(μ, newμ[:,end:end,:], dims=2)
+        logσ = cat(logσ, newlogσ[:,end:end,:], dims=2)
     end
 
     StructArray{Normal}((μ, exp.(logσ)))
@@ -622,7 +623,7 @@ function _update!(p::MATPolicy, t::Any)
 
             inds = rand_inds[(i-1)*microbatch_size+1:i*microbatch_size]
 
-            global s, a, r, log_p, adv
+            #global s, a, r, log_p, adv
 
             s = to_device(collect(select_last_dim(states, inds)))
             a = to_device(collect(select_last_dim(actions, inds)))
@@ -639,7 +640,7 @@ function _update!(p::MATPolicy, t::Any)
 
 
             g_encoder, g_decoder = Flux.gradient(p.encoder, p.decoder) do encoder, decoder
-                global obs_rep, v′, temp_act, μ, logσ, log_p′ₐ, ratio
+                #global obs_rep, v′, temp_act, μ, logσ, log_p′ₐ, ratio
 
                 obs_rep, v′ = encoder(s)
 
@@ -657,20 +658,20 @@ function _update!(p::MATPolicy, t::Any)
                 ignore() do
                     approx_kl_div = mean((ratio .- 1) - log.(ratio)) |> send_to_host
 
-                    if approx_kl_div > p.target_kl
+                    if approx_kl_div > p.target_kl && i > 1 # only in second batch
                         println("Target KL overstepped: $(approx_kl_div) at epoch $(epoch), batch $(i)")
                         stop_update = true
                     end
                 end
 
-                adv = reshape(adv, 1, size(adv)[1], size(adv)[2])
-                r = reshape(r, 1, size(r)[1], size(r)[2])
+                #adv = reshape(adv, 1, size(adv)[1], size(adv)[2])
+                #r = reshape(r, 1, size(r)[1], size(r)[2])
 
-                surr1 = ratio .* adv
-                surr2 = clamp.(ratio, 1.0f0 - clip_range, 1.0f0 + clip_range) .* adv
+                surr1 = ratio .* adv[1,:,:]
+                surr2 = clamp.(ratio, 1.0f0 - clip_range, 1.0f0 + clip_range) .* adv[1,:,:]
 
                 actor_loss = -mean(min.(surr1, surr2))
-                critic_loss = mean((r .- v′) .^ 2)
+                critic_loss = mean((r[1,:,:] .- v′) .^ 2)
                 loss = w₁ * actor_loss + w₂ * critic_loss - w₃ * entropy_loss
 
                 loss
