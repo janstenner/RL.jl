@@ -628,7 +628,7 @@ function _update!(p::MATPolicy, t::Any)
             log_p = select_last_dim(action_log_probs, inds)
             adv = select_last_dim(advantages, inds)
 
-            clamp!(log_p, log(1e-8), 0.0) # clamp old_prob to 1e-5 to avoid inf
+            clamp!(log_p, log(1e-8), Inf) # clamp old_prob to 1e-5 to avoid inf
 
             if p.normalize_advantage
                 adv = (adv .- mean(adv)) ./ clamp(std(adv), 1e-8, 1000.0)
@@ -654,7 +654,7 @@ function _update!(p::MATPolicy, t::Any)
                 ignore() do
                     approx_kl_div = mean((ratio .- 1) - log.(ratio)) |> send_to_host
 
-                    if approx_kl_div > p.target_kl && i > 1 # only in second batch
+                    if approx_kl_div > p.target_kl && (i > 1 || epoch > 1) # only in second batch
                         println("Target KL overstepped: $(approx_kl_div) at epoch $(epoch), batch $(i)")
                         stop_update = true
                     end
@@ -663,11 +663,11 @@ function _update!(p::MATPolicy, t::Any)
                 #adv = reshape(adv, 1, size(adv)[1], size(adv)[2])
                 #r = reshape(r, 1, size(r)[1], size(r)[2])
 
-                surr1 = ratio .* adv[1,:,:]
-                surr2 = clamp.(ratio, 1.0f0 - clip_range, 1.0f0 + clip_range) .* adv[1,:,:]
+                surr1 = ratio[1,:,:] .* adv
+                surr2 = clamp.(ratio[1,:,:], 1.0f0 - clip_range, 1.0f0 + clip_range) .* adv
 
                 actor_loss = -mean(min.(surr1, surr2))
-                critic_loss = mean((r[1,:,:] .- v′) .^ 2)
+                critic_loss = mean((r .- v′[1,:,:]) .^ 2)
                 loss = w₁ * actor_loss + w₂ * critic_loss - w₃ * entropy_loss
 
                 loss
