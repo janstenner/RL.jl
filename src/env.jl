@@ -80,7 +80,7 @@ function GeneralEnv(; te = 2.0,
 
     if isnothing(reward_function)
         reward_function = function(env) 
-            return 0.0
+            return env.reward
         end
     end
 

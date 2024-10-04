@@ -22,8 +22,8 @@ function (ca::CustomCrossAttention)(nt::NamedTuple)
     hidden_state, memory = nt.hidden_state, nt.memory
     cross_attention_mask = ChainRulesCore.ignore_derivatives(()->get(nt, :cross_attention_mask, nothing))
     nt_ext = Base.structdiff(nt, NamedTuple{(:hidden_state, :memory, :attention_mask, :cross_attention_mask)})
-    q = Transformers.Layers.with_extra(ca.q_proj, hidden_state, nt_ext)
-    kv = Transformers.Layers.with_extra(ca.kv_proj, memory, nt_ext)
+    q = Transformers.Layers.with_extra(ca.q_proj, memory, nt_ext)
+    kv = Transformers.Layers.with_extra(ca.kv_proj, hidden_state, nt_ext)
     _a = Transformers.Layers._apply_cross_attention_op(ca.attention_op, q, kv, cross_attention_mask)
     a = Transformers.Layers.rename(Base.structdiff(_a, NamedTuple{(:attention_mask, :cross_attention_mask)}),
                Val(:attention_score), Val(:cross_attention_score))
@@ -318,7 +318,7 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
         nl = LayerNorm(dim_model),
         dropout = Dropout(drop_out),
         block = Transformer(TransformerBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out),
-        head = Dense(dim_model, 1),
+        head = Dense(dim_model, 1) #Chain(Dense(dim_model, ffn_dim),Dense(ffn_dim, 1)),
     )
 
     decoder = MATDecoder(
@@ -639,6 +639,9 @@ function _update!(p::MATPolicy, t::Any)
                 #global obs_rep, v′, temp_act, μ, logσ, log_p′ₐ, ratio
 
                 obs_rep, v′ = encoder(s)
+                
+                # obs_rep, v′_no = p.encoder(s)
+                # obs_rep_no, v′ = encoder(s)
 
                 #parallel act
                 temp_act = cat(zeros(Float32,1,1,size(a)[3]),a[:,1:end-1,:],dims=2)

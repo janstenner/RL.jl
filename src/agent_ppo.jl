@@ -447,7 +447,7 @@ function _update!(p::PPOPolicy, t::Any)
             log_p = vec(action_log_probs)[inds]
             adv = vec(advantages)[inds]
 
-            clamp!(log_p, log(1e-8), 0.0) # clamp old_prob to 1e-5 to avoid inf
+            clamp!(log_p, log(1e-8), Inf) # clamp old_prob to 1e-5 to avoid inf
 
             if p.normalize_advantage
                 adv = (adv .- mean(adv)) ./ clamp(std(adv), 1e-8, 1000.0)
