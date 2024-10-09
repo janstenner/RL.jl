@@ -147,6 +147,7 @@ Base.@kwdef struct MATEncoder
     dropout
     block
     head
+    jointPPO
 end
 
 Flux.@functor MATEncoder
@@ -163,7 +164,15 @@ function (st::MATEncoder)(x)
     x = st.block(x, nothing)     # (dm, N, B)
     rep = x[:hidden_state]
 
-    v = st.head(rep)                   # (1, N, B)
+    if st.jointPPO
+        sr = size(rep)
+        v = st.head( reshape(rep, sr[1]*sr[2], sr[3]) )                   # (1, B)
+        v = reshape(v, 1, 1, sr[3])                   # (1, 1, B)
+        v = repeat(v, 1,sr[2],1)                   # (1, N, B)
+    else
+        v = st.head(rep)                   # (1, N, B)
+    end
+
     rep, v
 end
 
@@ -297,11 +306,12 @@ function create_logσ_mat(;logσ_is_network, ns, na, use_gpu, init, nna_scale, d
     return res
 end
 
-function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99))
+function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
     isnothing(fun_critic)               &&  (fun_critic = fun)
+    isnothing(head_dim)                 &&  (head_dim = Int(floor(dim_model/head_num)))
 
     init = Flux.glorot_uniform(rng)
 
@@ -309,8 +319,13 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     na = size(action_space)[1]
 
     
-    head_dim = Int(floor(dim_model/head_num))
     context_size = n_actors
+
+    if jointPPO
+        head = Chain(Dense(dim_model*n_actors, ffn_dim),Dense(ffn_dim, 1))
+    else
+        head = Chain(Dense(dim_model, ffn_dim),Dense(ffn_dim, 1))
+    end
 
     encoder = MATEncoder(
         embedding = Dense(ns, dim_model, relu, bias = false),
@@ -318,7 +333,8 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
         nl = LayerNorm(dim_model),
         dropout = Dropout(drop_out),
         block = Transformer(TransformerBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out),
-        head = Dense(dim_model, 1) #Chain(Dense(dim_model, ffn_dim),Dense(ffn_dim, 1)),
+        head = head,
+        jointPPO = jointPPO,
     )
 
     decoder = MATDecoder(
@@ -363,6 +379,7 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
             start_steps = start_steps,
             start_policy = start_policy,
             target_kl = target_kl,
+            jointPPO = jointPPO,
         ),
         trajectory = 
         CircularArrayTrajectory(;
@@ -406,6 +423,7 @@ Base.@kwdef mutable struct MATPolicy <: AbstractPolicy
     target_kl = 100.0
     last_action_log_prob::Vector{Float32} = [0.0]
     next_values::Vector{Float32} = [0.0]
+    jointPPO::Bool = false
 end
 
 
@@ -593,22 +611,41 @@ function _update!(p::MATPolicy, t::Any)
     values = reshape(flatten_batch(t[:values]), n_actors, :)
     next_values = cat(values[:,2:end], p.next_values, dims=2)
 
+    rewards = t[:reward]
+    terminal = t[:terminal]
+
+    if p.jointPPO
+        values = values[1,:]
+        next_values = next_values[1,:]
+        rewards = rewards[1,:]
+        terminal = terminal[1,:]
+    end
+
     advantages = generalized_advantage_estimation(
-        t[:reward],
+        rewards,
         values,
         next_values,
         γ,
         λ;
         dims=2,
-        terminal=t[:terminal]
+        terminal=terminal
     )
-    returns = to_device(advantages .+ select_last_dim(values, 1:n_rollout))
+
+    if p.jointPPO
+        returns = to_device(advantages .+ values[1:n_rollout])
+    else
+        returns = to_device(advantages .+ select_last_dim(values, 1:n_rollout))
+    end
     advantages = to_device(advantages)
 
     actions = to_device(t[:action])
     action_log_probs = t[:action_log_prob]
 
-    action_log_probs = reshape(action_log_probs, 1, size(action_log_probs)[1], size(action_log_probs)[2])
+    if p.jointPPO
+        action_log_probs = sum(action_log_probs, dims=1)[:]
+    else
+        action_log_probs = reshape(action_log_probs, 1, size(action_log_probs)[1], size(action_log_probs)[2])
+    end
 
     stop_update = false
 
@@ -651,6 +688,9 @@ function _update!(p::MATPolicy, t::Any)
 
                 entropy_loss = mean(size(logσ, 1) * (log(2.0f0π) + 1) .+ sum(logσ; dims=1)) / 2
                 
+                if p.jointPPO
+                    log_p′ₐ = sum(log_p′ₐ, dims=2)[:]
+                end
 
                 ratio = exp.(log_p′ₐ .- log_p)
 
@@ -666,11 +706,22 @@ function _update!(p::MATPolicy, t::Any)
                 #adv = reshape(adv, 1, size(adv)[1], size(adv)[2])
                 #r = reshape(r, 1, size(r)[1], size(r)[2])
 
-                surr1 = ratio[1,:,:] .* adv
-                surr2 = clamp.(ratio[1,:,:], 1.0f0 - clip_range, 1.0f0 + clip_range) .* adv
+                if p.jointPPO
+                    surr1 = ratio .* adv
+                    surr2 = clamp.(ratio, 1.0f0 - clip_range, 1.0f0 + clip_range) .* adv
+                else
+                    surr1 = ratio[1,:,:] .* adv
+                    surr2 = clamp.(ratio[1,:,:], 1.0f0 - clip_range, 1.0f0 + clip_range) .* adv
+                end
 
                 actor_loss = -mean(min.(surr1, surr2))
-                critic_loss = mean((r .- v′[1,:,:]) .^ 2)
+
+                if p.jointPPO
+                    critic_loss = mean((r .- v′[1,1,:]) .^ 2)
+                else
+                    critic_loss = mean((r .- v′[1,:,:]) .^ 2)
+                end
+                
                 loss = w₁ * actor_loss + w₂ * critic_loss - w₃ * entropy_loss
 
                 loss
