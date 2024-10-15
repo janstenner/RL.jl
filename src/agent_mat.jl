@@ -306,7 +306,7 @@ function create_logσ_mat(;logσ_is_network, ns, na, use_gpu, init, nna_scale, d
     return res
 end
 
-function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = relu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false)
+function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = leakyrelu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -322,13 +322,13 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     context_size = n_actors
 
     if jointPPO
-        head = Chain(Dense(dim_model*n_actors, ffn_dim),Dense(ffn_dim, 1))
+        head = Chain(Dense(dim_model*n_actors, ffn_dim, fun),Dense(ffn_dim, 1, fun))
     else
-        head = Chain(Dense(dim_model, ffn_dim),Dense(ffn_dim, 1))
+        head = Chain(Dense(dim_model, ffn_dim, fun),Dense(ffn_dim, 1, fun))
     end
 
     encoder = MATEncoder(
-        embedding = Dense(ns, dim_model, relu, bias = false),
+        embedding = Dense(ns, dim_model, fun, bias = false),
         position_encoding = Embedding(context_size => dim_model),
         nl = LayerNorm(dim_model),
         dropout = Dropout(drop_out),
@@ -338,12 +338,12 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     )
 
     decoder = MATDecoder(
-        embedding = Dense(na, dim_model, relu, bias = false),
+        embedding = Dense(na, dim_model, fun, bias = false),
         position_encoding = Embedding(context_size => dim_model),
         nl = LayerNorm(dim_model),
         dropout = Dropout(drop_out),
         block = Transformer(CustomTransformerDecoderBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out),
-        head = Dense(dim_model, na),
+        head = Chain(Dense(dim_model, ffn_dim, fun),Dense(ffn_dim, na, fun)),
         logσ = create_logσ_mat(logσ_is_network = logσ_is_network, ns = dim_model, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, start_logσ = start_logσ),
         logσ_is_network = logσ_is_network,
         max_σ = max_σ
