@@ -349,8 +349,8 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
         max_σ = max_σ
     )
 
-    encoder_optimizer = OptimiserChain(ClipNorm(clip_grad), ADAM(learning_rate, betas))
-    decoder_optimizer = OptimiserChain(ClipNorm(clip_grad), ADAM(learning_rate, betas))
+    encoder_optimizer = OptimiserChain(ClipNorm(clip_grad), Adam(learning_rate, betas))
+    decoder_optimizer = OptimiserChain(ClipNorm(clip_grad), Adam(learning_rate, betas))
 
     encoder_state_tree = Flux.setup(encoder_optimizer, encoder)
     decoder_state_tree = Flux.setup(decoder_optimizer, decoder)

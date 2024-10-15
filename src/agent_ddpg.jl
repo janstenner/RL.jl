@@ -32,7 +32,7 @@ function create_NNA(;na, ns, use_gpu, is_actor, init, copyfrom = nothing, nna_sc
 
     nna = CustomNeuralNetworkApproximator(
         model = use_gpu ? n |> gpu : n,
-        optimizer = Flux.ADAM(learning_rate),
+        optimizer = Flux.Adam(learning_rate),
     )
 
     if copyfrom !== nothing

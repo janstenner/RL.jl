@@ -86,8 +86,8 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
                     max_σ = max_σ
                 ),
                 critic = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = false, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic),
-                optimizer_actor = OptimiserChain(ClipNorm(clip_grad), ADAM(learning_rate)),
-                optimizer_critic = OptimiserChain(ClipNorm(clip_grad), ADAM(learning_rate)),
+                optimizer_actor = OptimiserChain(ClipNorm(clip_grad), Adam(learning_rate)),
+                optimizer_critic = OptimiserChain(ClipNorm(clip_grad), Adam(learning_rate)),
             ) : approximator,
             γ = y,
             λ = p,
