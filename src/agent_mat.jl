@@ -146,6 +146,11 @@ Base.@kwdef struct MATEncoder
     nl
     dropout
     block
+    embedding_v
+    position_encoding_v
+    nl_v
+    dropout_v
+    block_v
     head
     jointPPO
 end
@@ -153,6 +158,7 @@ end
 Flux.@functor MATEncoder
 
 function (st::MATEncoder)(x)
+    vv = st.embedding_v(x)
     x = st.embedding(x)              # (dm, N, B)
     N = size(x, 2)
     x = x .+ st.position_encoding(1:N) # (dm, N, B)
@@ -170,7 +176,11 @@ function (st::MATEncoder)(x)
         v = reshape(v, 1, 1, sr[3])                   # (1, 1, B)
         v = repeat(v, 1,sr[2],1)                   # (1, N, B)
     else
-        v = st.head(rep)                   # (1, N, B)
+        vv = vv .+ st.position_encoding_v(1:N)
+        vv = st.nl_v(vv)
+        vv = st.dropout_v(vv)                # (dm, N, B)
+        vv = st.block_v(vv, nothing)     # (dm, N, B)
+        v = st.head(vv[:hidden_state]) #st.head(rep)                   # (1, N, B)
     end
 
     rep, v
@@ -339,6 +349,11 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
         nl = LayerNorm(dim_model),
         dropout = Dropout(drop_out),
         block = Transformer(TransformerBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out),
+        embedding_v = Dense(ns, dim_model, fun, bias = false),
+        position_encoding_v = Embedding(context_size => dim_model),
+        nl_v = LayerNorm(dim_model),
+        dropout_v = Dropout(drop_out),
+        block_v = Transformer(TransformerBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out),
         head = head,
         jointPPO = jointPPO,
     )
