@@ -171,8 +171,14 @@ function (st::MATEncoder)(x)
     rep = x[:hidden_state]
 
     if st.jointPPO
-        sr = size(rep)
-        v = st.head( reshape(rep, sr[1]*sr[2], sr[3]) )                   # (1, B)
+        vv = vv .+ st.position_encoding_v(1:N)
+        vv = st.nl_v(vv)
+        vv = st.dropout_v(vv)                # (dm, N, B)
+        vv = st.block_v(vv, nothing)     # (dm, N, B)
+        vv = vv[:hidden_state]
+
+        sr = size(vv)
+        v = st.head( reshape(vv, sr[1]*sr[2], sr[3]) ) 
         v = reshape(v, 1, 1, sr[3])                   # (1, 1, B)
         v = repeat(v, 1,sr[2],1)                   # (1, N, B)
     else
@@ -332,9 +338,23 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     context_size = n_actors
 
     if jointPPO
-        head = Chain(Dense(dim_model*n_actors, ffn_dim, fun),Dense(ffn_dim, 1, fun))
+        if drop_middle_layer_critic
+            head_encoder = Dense(dim_model*n_actors, 1, fun)
+        else
+            head_encoder = Chain(Dense(dim_model*n_actors, ffn_dim, fun),Dense(ffn_dim, 1, fun))
+        end
     else
-        head = Chain(Dense(dim_model, ffn_dim, fun),Dense(ffn_dim, 1, fun))
+        if drop_middle_layer_critic
+            head_encoder = Dense(dim_model, 1, fun)
+        else
+            head_encoder = Chain(Dense(dim_model, ffn_dim, fun),Dense(ffn_dim, 1, fun))
+        end
+    end
+
+    if drop_middle_layer
+        head_decoder = Dense(dim_model, na, fun)
+    else
+        head_decoder = Chain(Dense(dim_model, ffn_dim, fun),Dense(ffn_dim, na, fun))
     end
 
     if customCrossAttention
@@ -354,7 +374,7 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
         nl_v = LayerNorm(dim_model),
         dropout_v = Dropout(drop_out),
         block_v = Transformer(TransformerBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out),
-        head = head,
+        head = head_encoder,
         jointPPO = jointPPO,
     )
 
@@ -364,7 +384,7 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
         nl = LayerNorm(dim_model),
         dropout = Dropout(drop_out),
         block = decoder_block,
-        head = Chain(Dense(dim_model, ffn_dim, fun),Dense(ffn_dim, na, fun)),
+        head = head_decoder,
         logσ = create_logσ_mat(logσ_is_network = logσ_is_network, ns = dim_model, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, start_logσ = start_logσ),
         logσ_is_network = logσ_is_network,
         max_σ = max_σ
