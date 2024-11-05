@@ -322,7 +322,7 @@ function create_logσ_mat(;logσ_is_network, ns, na, use_gpu, init, nna_scale, d
     return res
 end
 
-function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = leakyrelu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false, customCrossAttention = true)
+function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = leakyrelu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false, customCrossAttention = true, one_by_one_training = false)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -421,6 +421,7 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
             start_policy = start_policy,
             target_kl = target_kl,
             jointPPO = jointPPO,
+            one_by_one_training = one_by_one_training,
         ),
         trajectory = 
         CircularArrayTrajectory(;
@@ -465,6 +466,7 @@ Base.@kwdef mutable struct MATPolicy <: AbstractPolicy
     last_action_log_prob::Vector{Float32} = [0.0]
     next_values::Vector{Float32} = [0.0]
     jointPPO::Bool = false
+    one_by_one_training::Bool = false
 end
 
 
@@ -690,6 +692,13 @@ function _update!(p::MATPolicy, t::Any)
 
     stop_update = false
 
+    if p.one_by_one_training
+        n_epochs = n_epochs * p.n_actors
+    end
+
+    rand_actor_inds = shuffle!(rng, Vector(1:p.n_actors))
+    reverse_actor_inds = Vector(p.n_actors:-1:1)
+
     for epoch in 1:n_epochs
 
         rand_inds = shuffle!(rng, Vector(1:n_rollout))
@@ -727,7 +736,6 @@ function _update!(p::MATPolicy, t::Any)
                 
                 log_p′ₐ = sum(normlogpdf(μ, exp.(logσ), a), dims=1)
 
-                entropy_loss = mean(size(logσ, 1) * (log(2.0f0π) + 1) .+ sum(logσ; dims=1)) / 2
                 
                 if p.jointPPO
                     log_p′ₐ = sum(log_p′ₐ, dims=2)[:]
@@ -747,21 +755,46 @@ function _update!(p::MATPolicy, t::Any)
                 #adv = reshape(adv, 1, size(adv)[1], size(adv)[2])
                 #r = reshape(r, 1, size(r)[1], size(r)[2])
 
+
+                
+
                 if p.jointPPO
+                    entropy_loss = mean(size(logσ, 1) * (log(2.0f0π) + 1) .+ sum(logσ; dims=1)) / 2
+
                     surr1 = ratio .* adv
                     surr2 = clamp.(ratio, 1.0f0 - clip_range, 1.0f0 + clip_range) .* adv
+
+                    actor_loss = -mean(min.(surr1, surr2))
+
+                    critic_loss = mean((r .- v′[1,1,:]) .^ 2)
+
+                elseif p.one_by_one_training
+                    temp_index = 1 + epoch%p.n_actors
+                    #actor_index = rand_actor_inds[temp_index]
+                    #actor_index = reverse_actor_inds[temp_index]
+                    actor_index = temp_index
+
+                    entropy_loss = mean(size(logσ[:,actor_index,:], 1) * (log(2.0f0π) + 1) .+ sum(logσ[:,actor_index,:]; dims=1)) / 2
+
+                    surr1 = ratio[1,actor_index,:] .* adv[actor_index,:]
+                    surr2 = clamp.(ratio[1,actor_index,:], 1.0f0 - clip_range, 1.0f0 + clip_range) .* adv[actor_index,:]
+
+                    actor_loss = -mean(min.(surr1, surr2))
+
+                    critic_loss = mean((r[actor_index,:] .- v′[1,actor_index,:]) .^ 2)
+
                 else
+                    entropy_loss = mean(size(logσ, 1) * (log(2.0f0π) + 1) .+ sum(logσ; dims=1)) / 2
+
                     surr1 = ratio[1,:,:] .* adv
                     surr2 = clamp.(ratio[1,:,:], 1.0f0 - clip_range, 1.0f0 + clip_range) .* adv
-                end
 
-                actor_loss = -mean(min.(surr1, surr2))
+                    actor_loss = -mean(min.(surr1, surr2))
 
-                if p.jointPPO
-                    critic_loss = mean((r .- v′[1,1,:]) .^ 2)
-                else
                     critic_loss = mean((r .- v′[1,:,:]) .^ 2)
                 end
+
+
                 
                 loss = w₁ * actor_loss + w₂ * critic_loss - w₃ * entropy_loss
 
