@@ -59,6 +59,7 @@ include("./agent_ddpg team.jl")
 include("./multi_thread_env.jl")
 include("./agent_ppo.jl")
 include("./agent_mat.jl")
+include("./agent_matmix.jl")
 
 
 
