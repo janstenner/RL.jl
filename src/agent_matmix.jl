@@ -43,6 +43,40 @@ function (st::MATEncoder2)(x)
     rep, v
 end
 
+Base.@kwdef struct MATEncoder3
+    nl
+    dropout
+    block
+    head2
+    critic
+    jointPPO
+end
+
+Flux.@functor MATEncoder3
+
+function (st::MATEncoder3)(x)
+    vv = deepcopy(x)
+
+    x = st.nl(x)
+
+    x = st.dropout(x)                # (dm, N, B)
+
+    x = st.block(x, nothing)     # (dm, N, B)
+
+    rep = st.head2(x[:hidden_state])
+
+    if st.jointPPO
+        sr = size(vv)
+        v = st.critic( reshape(vv, sr[1]*sr[2], sr[3]) ) 
+        v = reshape(v, 1, 1, sr[3])                   # (1, 1, B)
+        v = repeat(v, 1,sr[2],1)                   # (1, N, B)
+    else
+        v = st.critic(vv)                # (1, N, B)
+    end
+
+    rep, v
+end
+
 
 
 function create_agent_matmix(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = leakyrelu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false, customCrossAttention = true, one_by_one_training = false, clip_range = 0.2f0, matmix_variant = 1)
@@ -96,6 +130,89 @@ function create_agent_matmix(;action_space, state_space, use_gpu, rng, y, p, upd
             dropout_v = Dropout(drop_out),
             block_v = Transformer(TransformerBlock, block_num, head_num, ns, head_dim, ffn_dim; dropout = drop_out),
             head = head_encoder,
+            jointPPO = jointPPO,
+        )
+
+        decoder = MATDecoder(
+            embedding = Dense(na, dim_model, fun, bias = false),
+            position_encoding = Embedding(context_size => dim_model),
+            nl = LayerNorm(dim_model),
+            dropout = Dropout(drop_out),
+            block = decoder_block,
+            head = head_decoder,
+            logσ = create_logσ_mat(logσ_is_network = logσ_is_network, ns = dim_model, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, start_logσ = start_logσ),
+            logσ_is_network = logσ_is_network,
+            max_σ = max_σ
+        )
+    elseif matmix_variant == 2
+        if jointPPO
+            if drop_middle_layer_critic
+                head_encoder = Dense(dim_model*n_actors, 1, fun)
+            else
+                head_encoder = Chain(Dense(dim_model*n_actors, ffn_dim, fun),Dense(ffn_dim, 1, fun))
+            end
+        else
+            if drop_middle_layer_critic
+                head_encoder = Dense(dim_model, 1, fun)
+            else
+                head_encoder = Chain(Dense(dim_model, ffn_dim, fun),Dense(ffn_dim, 1, fun))
+            end
+        end
+
+        encoder = MATEncoder(
+            embedding = Dense(ns, dim_model, fun, bias = false),
+            position_encoding = Embedding(context_size => dim_model),
+            nl = LayerNorm(dim_model),
+            dropout = Dropout(drop_out),
+            block = Transformer(TransformerBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out),
+            embedding_v = Dense(ns, dim_model, fun, bias = false),
+            position_encoding_v = Embedding(context_size => dim_model),
+            nl_v = LayerNorm(dim_model),
+            dropout_v = Dropout(drop_out),
+            block_v = Transformer(TransformerBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out),
+            head = head_encoder,
+            jointPPO = jointPPO,
+        )
+
+        decoder = GaussianNetwork(
+            μ = create_chain(ns = dim_model, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = false),
+            logσ = create_logσ(logσ_is_network = logσ_is_network, ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, start_logσ = start_logσ),
+            logσ_is_network = logσ_is_network,
+            max_σ = max_σ
+        )
+    elseif matmix_variant == 3
+        if jointPPO
+            if drop_middle_layer_critic
+                head_encoder = Dense(ns*n_actors, 1, fun)
+            else
+                head_encoder = Chain(Dense(ns*n_actors, 512, fun),Dense(512, 1, fun))
+            end
+        else
+            if drop_middle_layer_critic
+                head_encoder = Dense(ns, 1, fun)
+            else
+                head_encoder = Chain(Dense(ns, 512, fun),Dense(512, 1, fun))
+            end
+        end
+
+        if drop_middle_layer
+            head_decoder = Dense(dim_model, na, fun)
+        else
+            head_decoder = Chain(Dense(dim_model, ffn_dim, fun),Dense(ffn_dim, na, fun))
+        end
+
+        if customCrossAttention
+            decoder_block = Transformer(CustomTransformerDecoderBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out)
+        else
+            decoder_block = Transformer(TransformerDecoderBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out)
+        end
+
+        encoder = MATEncoder3(
+            nl = LayerNorm(ns),
+            dropout = Dropout(drop_out),
+            block = Transformer(TransformerBlock, block_num, head_num, ns, head_dim, ffn_dim; dropout = drop_out),
+            head2 = Dense(ns, dim_model, fun),
+            critic = head_encoder,
             jointPPO = jointPPO,
         )
 
@@ -199,7 +316,7 @@ function prob(
     state::AbstractArray,
     mask,
 )
-    if p.matmix_variant == 1
+    if p.matmix_variant == 1 || p.matmix_variant == 3
         na = size(p.decoder.embedding.weight)[2]
         batch_size = length(size(state)) == 3 ? size(state)[3] : 1
 
@@ -215,6 +332,14 @@ function prob(
         end
 
         return StructArray{Normal}((μ, exp.(logσ)))
+    elseif p.matmix_variant == 2
+        obsrep, val = p.encoder(state)
+
+        obsrep = obsrep[:,:,1]
+
+        μ, logσ = p.decoder(obsrep)
+
+        StructArray{Normal}((μ, exp.(logσ)))
     end
 end
 
@@ -456,11 +581,22 @@ function _update!(p::MATMIXPolicy, t::Any)
                 # obs_rep, v′_no = p.encoder(s)
                 # obs_rep_no, v′ = encoder(s)
 
-                #parallel act
-                temp_act = cat(zeros(Float32,1,1,size(a)[3]),a[:,1:end-1,:],dims=2)
-                μ, logσ = decoder(temp_act, obs_rep)
-                
-                log_p′ₐ = sum(normlogpdf(μ, exp.(logσ), a), dims=1)
+                if p.matmix_variant == 1 || p.matmix_variant == 3
+                    #parallel act
+                    temp_act = cat(zeros(Float32,1,1,size(a)[3]),a[:,1:end-1,:],dims=2)
+                    μ, logσ = decoder(temp_act, obs_rep)
+                    
+                    log_p′ₐ = sum(normlogpdf(μ, exp.(logσ), a), dims=1)
+                elseif p.matmix_variant == 2
+                    obs_rep = obs_rep[:,:,1]
+
+                    μ, logσ = p.decoder(obs_rep)
+                    if ndims(a) == 2
+                        log_p′ₐ = vec(sum(normlogpdf(μ, exp.(logσ), a), dims=1))
+                    else
+                        log_p′ₐ = normlogpdf(μ, exp.(logσ), a)
+                    end
+                end
 
                 
                 if p.jointPPO
