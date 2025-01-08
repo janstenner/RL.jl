@@ -158,7 +158,7 @@ end
 Flux.@functor MATEncoder
 
 function (st::MATEncoder)(x)
-    vv = st.embedding_v(x)
+    # vv = st.embedding_v(x)
     x = st.embedding(x)              # (dm, N, B)
     N = size(x, 2)
     x = x .+ st.position_encoding(1:N) # (dm, N, B)
@@ -182,11 +182,12 @@ function (st::MATEncoder)(x)
         v = reshape(v, 1, 1, sr[3])                   # (1, 1, B)
         v = repeat(v, 1,sr[2],1)                   # (1, N, B)
     else
-        vv = vv .+ st.position_encoding_v(1:N)
-        vv = st.nl_v(vv)
-        vv = st.dropout_v(vv)                # (dm, N, B)
-        vv = st.block_v(vv, nothing)     # (dm, N, B)
-        v = st.head(vv[:hidden_state]) #st.head(rep)                   # (1, N, B)
+        # vv = vv .+ st.position_encoding_v(1:N)
+        # vv = st.nl_v(vv)
+        # vv = st.dropout_v(vv)                # (dm, N, B)
+        # vv = st.block_v(vv, nothing)     # (dm, N, B)
+        # v = st.head(vv[:hidden_state])       # (1, N, B)
+        v = st.head(rep)                   # (1, N, B)
     end
 
     rep, v
@@ -222,6 +223,8 @@ function (st::MATDecoder)(x, obs_rep)
     x = x[:hidden_state]
 
     x = st.head(x)                   # (1, N, B)
+
+    #x = st.head(obs_rep) 
 
     if st.logσ_is_network
         raw_logσ = logσ(obs_rep)
@@ -339,22 +342,22 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
 
     if jointPPO
         if drop_middle_layer_critic
-            head_encoder = Dense(dim_model*n_actors, 1, fun)
+            head_encoder = Dense(dim_model*n_actors, 1)
         else
-            head_encoder = Chain(Dense(dim_model*n_actors, ffn_dim, fun),Dense(ffn_dim, 1, fun))
+            head_encoder = Chain(Dense(dim_model*n_actors, ffn_dim, fun),Dense(ffn_dim, 1))
         end
     else
         if drop_middle_layer_critic
-            head_encoder = Dense(dim_model, 1, fun)
+            head_encoder = Dense(dim_model, 1)
         else
-            head_encoder = Chain(Dense(dim_model, ffn_dim, fun),Dense(ffn_dim, 1, fun))
+            head_encoder = Chain(Dense(dim_model, ffn_dim, fun),Dense(ffn_dim, 1))
         end
     end
 
     if drop_middle_layer
-        head_decoder = Dense(dim_model, na, fun)
+        head_decoder = Dense(dim_model, na, tanh)
     else
-        head_decoder = Chain(Dense(dim_model, ffn_dim, fun),Dense(ffn_dim, na, fun))
+        head_decoder = Chain(Dense(dim_model, ffn_dim, fun),Dense(ffn_dim, na, tanh))
     end
 
     if customCrossAttention
@@ -365,7 +368,8 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
 
     encoder = MATEncoder(
         embedding = Dense(ns, dim_model, fun, bias = false),
-        position_encoding = Embedding(context_size => dim_model),
+        #position_encoding = Embedding(context_size => dim_model),
+        position_encoding = SinCosPositionEmbed(dim_model),
         nl = LayerNorm(dim_model),
         dropout = Dropout(drop_out),
         block = Transformer(TransformerBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out),
@@ -380,7 +384,8 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
 
     decoder = MATDecoder(
         embedding = Dense(na, dim_model, fun, bias = false),
-        position_encoding = Embedding(context_size => dim_model),
+        #position_encoding = Embedding(context_size => dim_model),
+        position_encoding = SinCosPositionEmbed(dim_model),
         nl = LayerNorm(dim_model),
         dropout = Dropout(drop_out),
         block = decoder_block,
@@ -517,29 +522,30 @@ end
 function (p::MATPolicy)(env::AbstractEnv)
 
     if p.update_step <= p.start_steps
-        p.start_policy(env)
+        dist = prob(p, env)
+        action = p.start_policy(env)
     else
         dist = prob(p, env)
         action = rand.(p.rng, dist)
-
-        if p.clip1
-            clamp!(action, -1.0, 1.0)
-        end
-
-        # put the last action log prob behind the clip
-        
-        ###p.last_action_log_prob = vec(sum(logpdf.(dist, action), dims=1))
-
-        if ndims(action) == 2
-            log_p = vec(sum(normlogpdf(dist.μ, dist.σ, action), dims=1))
-        else
-            log_p = normlogpdf(dist.μ, dist.σ, action)
-        end
-
-        p.last_action_log_prob = log_p[:]
-
-        action
     end
+
+    if p.clip1
+        clamp!(action, -1.0, 1.0)
+    end
+
+    # put the last action log prob behind the clip
+    
+    ###p.last_action_log_prob = vec(sum(logpdf.(dist, action), dims=1))
+
+    if ndims(action) == 2
+        log_p = vec(sum(normlogpdf(dist.μ, dist.σ, action), dims=1))
+    else
+        log_p = normlogpdf(dist.μ, dist.σ, action)
+    end
+
+    p.last_action_log_prob = log_p[:]
+
+    action
 end
 
 function (agent::Agent{<:MATPolicy})(env::MultiThreadEnv)
@@ -794,9 +800,15 @@ function _update!(p::MATPolicy, t::Any)
                     critic_loss = mean((r .- v′[1,:,:]) .^ 2)
                 end
 
-
+                
                 
                 loss = w₁ * actor_loss + w₂ * critic_loss - w₃ * entropy_loss
+
+                # println("---")
+                # println(actor_loss)
+                # println(critic_loss)
+                # println(loss)
+                # println("---")
 
                 loss
             end
