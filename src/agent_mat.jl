@@ -158,7 +158,7 @@ end
 Flux.@functor MATEncoder
 
 function (st::MATEncoder)(x)
-    # vv = st.embedding_v(x)
+    vv = st.embedding_v(x)
     x = st.embedding(x)              # (dm, N, B)
     N = size(x, 2)
     x = x .+ st.position_encoding(1:N) # (dm, N, B)
@@ -182,12 +182,12 @@ function (st::MATEncoder)(x)
         v = reshape(v, 1, 1, sr[3])                   # (1, 1, B)
         v = repeat(v, 1,sr[2],1)                   # (1, N, B)
     else
-        # vv = vv .+ st.position_encoding_v(1:N)
-        # vv = st.nl_v(vv)
-        # vv = st.dropout_v(vv)                # (dm, N, B)
-        # vv = st.block_v(vv, nothing)     # (dm, N, B)
-        # v = st.head(vv[:hidden_state])       # (1, N, B)
-        v = st.head(rep)                   # (1, N, B)
+        vv = vv .+ st.position_encoding_v(1:N)
+        vv = st.nl_v(vv)
+        vv = st.dropout_v(vv)                # (dm, N, B)
+        vv = st.block_v(vv, nothing)     # (dm, N, B)
+        v = st.head(vv[:hidden_state])       # (1, N, B)
+        #v = st.head(rep)                   # (1, N, B)
     end
 
     rep, v
@@ -325,7 +325,32 @@ function create_logσ_mat(;logσ_is_network, ns, na, use_gpu, init, nna_scale, d
     return res
 end
 
-function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = leakyrelu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false, customCrossAttention = true, one_by_one_training = false, clip_range = 0.2f0)
+
+struct CustomClipNorm <: Optimisers.AbstractRule
+    omega::Float64
+    p::Float64
+    throw::Bool
+end
+CustomClipNorm(ω = 10, p = 2; throw::Bool = true) = CustomClipNorm(ω, p, throw)
+  
+Optimisers.init(o::CustomClipNorm, x::AbstractArray) = nothing
+  
+function Optimisers.apply!(o::CustomClipNorm, state, x::AbstractArray{T}, dx) where T
+    nrm = Optimisers._norm(dx, o.p)
+
+    println("The gradient norm is $(nrm)")
+
+    if o.throw && !isfinite(nrm)
+        throw(DomainError("gradient has $(o.p)-norm $nrm, for array $(summary(x))"))
+    end
+    λ = T(min(o.omega / nrm, 1))
+
+    return state, Optimisers.@lazy dx * λ
+end
+
+
+
+function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = leakyrelu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false, customCrossAttention = true, one_by_one_training = false, clip_range = 0.2f0, tanh_end = true)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -355,9 +380,20 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     end
 
     if drop_middle_layer
-        head_decoder = Dense(dim_model, na, tanh)
+        if tanh_end
+            head_decoder = Dense(dim_model, na, tanh)
+        else
+            head_decoder = Dense(dim_model, na)
+        end
+        head_decoder.weight[:] *= 0.01
+        head_decoder.bias[:] *= 0.01
     else
-        head_decoder = Chain(Dense(dim_model, ffn_dim, fun),Dense(ffn_dim, na, tanh))
+        if tanh_end
+            head_decoder = Chain(Dense(dim_model, ffn_dim, fun),Dense(ffn_dim, na, tanh))
+        else
+            head_decoder = Chain(Dense(dim_model, ffn_dim, fun),Dense(ffn_dim, na))
+        end
+        
     end
 
     if customCrossAttention
@@ -395,8 +431,17 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
         max_σ = max_σ
     )
 
-    encoder_optimizer = OptimiserChain(ClipNorm(clip_grad), Adam(learning_rate, betas))
-    decoder_optimizer = OptimiserChain(ClipNorm(clip_grad), Adam(learning_rate, betas))
+    
+    
+    #encoder_optimizer = Optimisers.OptimiserChain(CustomClipNorm(clip_grad), Optimisers.Adam(learning_rate, betas))
+    # encoder_optimizer = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas, 0.01))
+    # decoder_optimizer = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas, 0.01))
+
+    # encoder_optimizer = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.RMSProp(learning_rate))
+    # decoder_optimizer = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.RMSProp(learning_rate))
+
+    encoder_optimizer = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate, betas))
+    decoder_optimizer = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate, betas))
 
     encoder_state_tree = Flux.setup(encoder_optimizer, encoder)
     decoder_state_tree = Flux.setup(decoder_optimizer, decoder)
@@ -418,6 +463,7 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
             actor_loss_weight = actor_loss_weight,
             critic_loss_weight = critic_loss_weight,
             entropy_loss_weight = entropy_loss_weight,
+            adaptive_weights = adaptive_weights,
             rng = rng,
             update_freq = update_freq,
             clip1 = clip1,
@@ -460,6 +506,7 @@ Base.@kwdef mutable struct MATPolicy <: AbstractPolicy
     actor_loss_weight::Float32 = 1.0f0
     critic_loss_weight::Float32 = 0.5f0
     entropy_loss_weight::Float32 = 0.0f0
+    adaptive_weights::Bool = false
     rng = StableRNG()
     update_freq::Int = 200
     update_step::Int = 0
@@ -705,6 +752,9 @@ function _update!(p::MATPolicy, t::Any)
     rand_actor_inds = shuffle!(rng, Vector(1:p.n_actors))
     reverse_actor_inds = Vector(p.n_actors:-1:1)
 
+    actor_losses = Float32[]
+    critic_losses = Float32[]
+
     for epoch in 1:n_epochs
 
         rand_inds = shuffle!(rng, Vector(1:n_rollout))
@@ -804,11 +854,10 @@ function _update!(p::MATPolicy, t::Any)
                 
                 loss = w₁ * actor_loss + w₂ * critic_loss - w₃ * entropy_loss
 
-                # println("---")
-                # println(actor_loss)
-                # println(critic_loss)
-                # println(loss)
-                # println("---")
+                ignore() do
+                    push!(actor_losses, w₁ * actor_loss)
+                    push!(critic_losses, w₂ * critic_loss)
+                end
 
                 loss
             end
@@ -826,5 +875,23 @@ function _update!(p::MATPolicy, t::Any)
             break
         end
     end
+
+    mean_actor_loss = mean(abs.(actor_losses))
+    mean_critic_loss = mean(abs.(critic_losses))
+    println("---")
+    println(mean_actor_loss)
+    println(mean_critic_loss)
+    
+
+    if p.adaptive_weights
+        actor_factor = clamp(0.5/mean_actor_loss, 0.9, 1.1)
+        critic_factor = clamp(0.3/mean_critic_loss, 0.9, 1.1)
+        println("changing actor weight from $(w₁) to $(w₁*actor_factor)")
+        println("changing critic weight from $(w₂) to $(w₂*critic_factor)")
+        p.actor_loss_weight = w₁ * actor_factor
+        p.critic_loss_weight = w₂ * critic_factor
+    end
+
+    println("---")
 end
 

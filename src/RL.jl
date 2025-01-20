@@ -11,6 +11,7 @@ using Distributions
 using StructArrays
 using UnicodePlots:lineplot
 using Flux
+using Optimisers
 using CUDA
 using Adapt
 using Random
