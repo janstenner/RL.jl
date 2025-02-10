@@ -500,6 +500,11 @@ function _update!(p::PPOPolicy, t::Any)
                 critic_loss = mean((r .- v′) .^ 2)
                 loss = w₁ * actor_loss + w₂ * critic_loss - w₃ * entropy_loss
 
+                # println("-------------")
+                # println(w₁ * actor_loss)
+                # println(w₂ * critic_loss)
+                # println(w₃ * entropy_loss)
+
                 loss
             end
             
