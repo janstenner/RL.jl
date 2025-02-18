@@ -119,19 +119,29 @@ function PostNormTransformerDecoderBlock(
 
     if UseCustomCrossAttention
         ca = CustomCrossAttention(head, hidden_size, head_hidden_size; dropout = cross_attention_dropout, return_score)
+
+        ca_layer = CustomPostNormResidual(
+            Transformers.Layers.DropoutLayer(ca, dropout),
+            Transformers.Layers.LayerNorm(hidden_size))
     else
         ca = Transformers.Layers.CrossAttention(head, hidden_size, head_hidden_size; dropout = cross_attention_dropout, return_score)
+
+        ca_layer = Transformers.Layers.PostNormResidual(
+            Transformers.Layers.DropoutLayer(ca, dropout),
+            Transformers.Layers.LayerNorm(hidden_size))
     end
 
     ff1 = Transformers.Layers.Dense(act, hidden_size, intermediate_size)
     ff2 = Transformers.Layers.Dense(intermediate_size, hidden_size)
+
+
     return CustomTransformerDecoderBlock(
         Transformers.Layers.PostNormResidual(
             Transformers.Layers.DropoutLayer(sa, dropout),
             Transformers.Layers.LayerNorm(hidden_size)),
-        CustomPostNormResidual(
-            Transformers.Layers.DropoutLayer(ca, dropout),
-            Transformers.Layers.LayerNorm(hidden_size)),
+
+        ca_layer,
+
         Transformers.Layers.PostNormResidual(
             Transformers.Layers.DropoutLayer(Chain(ff1, ff2), dropout),
             Transformers.Layers.LayerNorm(hidden_size)))
