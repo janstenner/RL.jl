@@ -227,7 +227,7 @@ function (st::MATDecoder)(x, obs_rep)
     #x = st.head(obs_rep) 
 
     if st.logσ_is_network
-        raw_logσ = logσ(obs_rep)
+        raw_logσ = st.logσ(obs_rep)
     else
         if ndims(x) >= 2
             # TODO: Make it GPU friendly again (CUDA.fill or like Flux Dense Layer does it with bias - Linear Layer with freezing)
@@ -350,7 +350,13 @@ end
 
 
 
-function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = leakyrelu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false, customCrossAttention = true, one_by_one_training = false, clip_range = 0.2f0, tanh_end = true)
+struct ZeroEncoding
+    hidden_size::Int
+end
+
+(embed::ZeroEncoding)(x) = zeros(embed.hidden_size, x)
+
+function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = leakyrelu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false, customCrossAttention = true, one_by_one_training = false, clip_range = 0.2f0, tanh_end = true, positional_encoding = 1)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -402,10 +408,20 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
         decoder_block = Transformer(TransformerDecoderBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out)
     end
 
+    if positional_encoding == 1
+        position_encoding_encoder = SinCosPositionEmbed(dim_model)
+        position_encoding_decoder = SinCosPositionEmbed(dim_model)
+    elseif positional_encoding == 2
+        position_encoding_encoder = Embedding(context_size => dim_model)
+        position_encoding_decoder = Embedding(context_size => dim_model)
+    elseif positional_encoding == 3
+        position_encoding_encoder = ZeroEncoding(dim_model)
+        position_encoding_decoder = ZeroEncoding(dim_model)
+    end
+
     encoder = MATEncoder(
         embedding = Dense(ns, dim_model, fun, bias = false),
-        #position_encoding = Embedding(context_size => dim_model),
-        position_encoding = SinCosPositionEmbed(dim_model),
+        position_encoding = position_encoding_encoder,
         nl = LayerNorm(dim_model),
         dropout = Dropout(drop_out),
         block = Transformer(TransformerBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out),
@@ -420,8 +436,7 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
 
     decoder = MATDecoder(
         embedding = Dense(na, dim_model, fun, bias = false),
-        #position_encoding = Embedding(context_size => dim_model),
-        position_encoding = SinCosPositionEmbed(dim_model),
+        position_encoding = position_encoding_decoder,
         nl = LayerNorm(dim_model),
         dropout = Dropout(drop_out),
         block = decoder_block,
