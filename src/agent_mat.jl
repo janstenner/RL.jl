@@ -87,7 +87,7 @@ argument_names(b::CustomTransformerDecoderBlock) = Base.merge_names(
 Transformers.Layers.argument_names(b::CustomTransformerDecoderBlock) = argument_names(b)
 
 (b::CustomTransformerDecoderBlock)(nt::NamedTuple) =
-    Transformers.Layers.apply_on_namedtuple(b.feedforward, Transformers.Layers.apply_on_namedtuple(b.crossattention, Transformers.Layers.apply_on_namedtuple(b.attention, nt)))
+    Transformers.Layers.apply_on_namedtuple(b.feedforward, Transformers.Layers.apply_on_namedtuple(b.attention, Transformers.Layers.apply_on_namedtuple(b.crossattention, nt)))
 
 
 CustomTransformerDecoderBlock(
@@ -364,7 +364,7 @@ struct ZeroEncoding
     hidden_size::Int
 end
 
-(embed::ZeroEncoding)(x) = zeros(embed.hidden_size, x)
+(embed::ZeroEncoding)(x) = zeros(Float32, embed.hidden_size, x)
 
 function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = leakyrelu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false, customCrossAttention = true, one_by_one_training = false, clip_range = 0.2f0, tanh_end = true, positional_encoding = 1)
 
@@ -436,7 +436,7 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
         dropout = Dropout(drop_out),
         block = Transformer(TransformerBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out),
         embedding_v = Dense(ns, dim_model, fun, bias = false),
-        position_encoding_v = Embedding(context_size => dim_model),
+        position_encoding_v = position_encoding_encoder,
         nl_v = LayerNorm(dim_model),
         dropout_v = Dropout(drop_out),
         block_v = Transformer(TransformerBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out),
