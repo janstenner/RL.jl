@@ -173,7 +173,9 @@ function (st::MATEncoder)(x)
     N = size(x, 2)
     x = x .+ st.position_encoding(1:N) # (dm, N, B)
 
-    x = st.nl(x)
+    if !(iszero(x))
+        x = st.nl(x)
+    end
 
     x = st.dropout(x)                # (dm, N, B)
 
@@ -182,7 +184,11 @@ function (st::MATEncoder)(x)
 
     if st.jointPPO
         vv = vv .+ st.position_encoding_v(1:N)
-        vv = st.nl_v(vv)
+
+        if !(iszero(vv))
+            vv = st.nl_v(vv)
+        end
+
         vv = st.dropout_v(vv)                # (dm, N, B)
         vv = st.block_v(vv, nothing)     # (dm, N, B)
         vv = vv[:hidden_state]
@@ -193,7 +199,11 @@ function (st::MATEncoder)(x)
         v = repeat(v, 1,sr[2],1)                   # (1, N, B)
     else
         vv = vv .+ st.position_encoding_v(1:N)
-        vv = st.nl_v(vv)
+        
+        if !(iszero(vv))
+            vv = st.nl_v(vv)
+        end
+
         vv = st.dropout_v(vv)                # (dm, N, B)
         vv = st.block_v(vv, nothing)     # (dm, N, B)
         v = st.head(vv[:hidden_state])       # (1, N, B)
@@ -224,7 +234,9 @@ function (st::MATDecoder)(x, obs_rep)
     N = size(x, 2)
     x = x .+ st.position_encoding(1:N) # (dm, N, B)
 
-    x = st.nl(x)
+    if !(iszero(x))
+        x = st.nl(x)
+    end
 
     x = st.dropout(x)                # (dm, N, B)
 
@@ -364,7 +376,7 @@ struct ZeroEncoding
     hidden_size::Int
 end
 
-(embed::ZeroEncoding)(x) = zeros(Float32, embed.hidden_size, x)
+(embed::ZeroEncoding)(x) = zeros(Float32, embed.hidden_size, length(x))
 
 function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = leakyrelu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false, customCrossAttention = true, one_by_one_training = false, clip_range = 0.2f0, tanh_end = true, positional_encoding = 1)
 
@@ -432,12 +444,12 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     encoder = MATEncoder(
         embedding = Dense(ns, dim_model, fun, bias = false),
         position_encoding = position_encoding_encoder,
-        nl = LayerNorm(dim_model),
+        nl = LayerNorm(dim_model, affine = false),
         dropout = Dropout(drop_out),
         block = Transformer(TransformerBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out),
         embedding_v = Dense(ns, dim_model, fun, bias = false),
         position_encoding_v = position_encoding_encoder,
-        nl_v = LayerNorm(dim_model),
+        nl_v = LayerNorm(dim_model, affine = false),
         dropout_v = Dropout(drop_out),
         block_v = Transformer(TransformerBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out),
         head = head_encoder,
@@ -447,13 +459,13 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     decoder = MATDecoder(
         embedding = Dense(na, dim_model, fun, bias = false),
         position_encoding = position_encoding_decoder,
-        nl = LayerNorm(dim_model),
+        nl = LayerNorm(dim_model, affine = false),
         dropout = Dropout(drop_out),
         block = decoder_block,
         head = head_decoder,
         logσ = create_logσ_mat(logσ_is_network = logσ_is_network, ns = dim_model, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, start_logσ = start_logσ),
         logσ_is_network = logσ_is_network,
-        max_σ = max_σ
+        max_σ = max_σ,
     )
 
     
