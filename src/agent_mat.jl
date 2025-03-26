@@ -235,7 +235,8 @@ function (st::MATDecoder)(x, obs_rep)
     x = x .+ st.position_encoding(1:N) # (dm, N, B)
 
     if !(iszero(x))
-        x = st.nl(x)
+        # x = st.nl(x)
+        x = (x.-mean(x))./std(x)
     end
 
     x = st.dropout(x)                # (dm, N, B)
