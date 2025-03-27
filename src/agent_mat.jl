@@ -235,8 +235,8 @@ function (st::MATDecoder)(x, obs_rep)
     x = x .+ st.position_encoding(1:N) # (dm, N, B)
 
     if !(iszero(x))
-        # x = st.nl(x)
-        x = (x.-mean(x))./std(x)
+        x = st.nl(x)
+        # x = (x.-mean(x, dims=1))./std(x, dims=1)
     end
 
     x = st.dropout(x)                # (dm, N, B)
@@ -443,7 +443,7 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     end
 
     encoder = MATEncoder(
-        embedding = Dense(ns, dim_model, fun, bias = false),
+        embedding = Dense(ns, dim_model, relu, bias = false),
         position_encoding = position_encoding_encoder,
         nl = LayerNorm(dim_model, affine = false),
         dropout = Dropout(drop_out),
@@ -458,7 +458,7 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     )
 
     decoder = MATDecoder(
-        embedding = Dense(na, dim_model, fun, bias = false),
+        embedding = Dense(na, dim_model, relu, bias = false),
         position_encoding = position_encoding_decoder,
         nl = LayerNorm(dim_model, affine = false),
         dropout = Dropout(drop_out),
@@ -824,9 +824,18 @@ function _update!(p::MATPolicy, t::Any)
                 # obs_rep, v′_no = p.encoder(s)
                 # obs_rep_no, v′ = encoder(s)
 
-                #parallel act
-                temp_act = cat(zeros(Float32,1,1,size(a)[3]),a[:,1:end-1,:],dims=2)
-                μ, logσ = decoder(temp_act, obs_rep)
+                # parallel act
+                # temp_act = cat(zeros(Float32,1,1,size(a)[3]),a[:,1:end-1,:],dims=2)
+                # μ, logσ = decoder(temp_act, obs_rep)
+
+                # auto regressive act
+                μ, logσ = decoder(zeros(Float32,size(a,1),1,microbatch_size), obs_rep[:,1:1,:])
+
+                for n in 2:p.n_actors
+                    newμ, newlogσ = decoder(cat(zeros(Float32,size(a,1),1,microbatch_size), μ, dims=2), obs_rep[:,1:n,:])
+
+                    μ = cat(μ, newμ[:,end:end,:], dims=2)
+                end
                 
                 log_p′ₐ = sum(normlogpdf(μ, exp.(logσ), a), dims=1)
 
