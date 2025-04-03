@@ -10,8 +10,8 @@ Base.@kwdef mutable struct GeneralHook <: AbstractHook
     display_after_episode = false
     generate_random_init = nothing
     collect_history::Bool = false
-    collect_NNA::Bool = true
-    collect_bestDF::Bool = true
+    collect_NNA::Bool = false
+    collect_bestDF::Bool = false
     collect_rewards_all_timesteps::Bool = true
 
     min_best_episode = 0
