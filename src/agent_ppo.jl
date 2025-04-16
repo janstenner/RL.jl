@@ -55,7 +55,14 @@ function create_logσ(;logσ_is_network, ns, na, use_gpu, init, nna_scale, drop_
     res = nothing
 
     if logσ_is_network
-        res = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = false)
+        # res = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = false)
+
+        nna_size = Int(floor(10 * nna_scale))
+
+        res = Chain(
+            Dense(ns, nna_size, relu, bias = false),
+            Dense(nna_size, na, identity, bias = false)
+        )
     else
         res = Matrix(Matrix(Float32.(ones(na) .* start_logσ)')')
     end
