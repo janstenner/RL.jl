@@ -63,6 +63,10 @@ function create_logσ(;logσ_is_network, ns, na, use_gpu, init, nna_scale, drop_
             Dense(ns, nna_size, relu, bias = false),
             Dense(nna_size, na, identity, bias = false)
         )
+
+        res.layers[1].weight[:] .*= 0.2
+        res.layers[2].weight[:] .*= 0.2
+        res.layers[2].weight[:] = -(abs.(res.layers[2].weight[:]))
     else
         res = Matrix(Matrix(Float32.(ones(na) .* start_logσ)')')
     end
@@ -434,6 +438,9 @@ function _update!(p::PPOPolicy, t::Any)
 
     stop_update = false
 
+    actor_losses = Float32[]
+    critic_losses = Float32[]
+
     for epoch in 1:n_epochs
 
         rand_inds = shuffle!(rng, Vector(1:n_envs*n_rollout))
@@ -507,10 +514,11 @@ function _update!(p::PPOPolicy, t::Any)
                 critic_loss = mean((r .- v′) .^ 2)
                 loss = w₁ * actor_loss + w₂ * critic_loss - w₃ * entropy_loss
 
-                # println("-------------")
-                # println(w₁ * actor_loss)
-                # println(w₂ * critic_loss)
-                # println(w₃ * entropy_loss)
+
+                ignore() do
+                    push!(actor_losses, w₁ * actor_loss)
+                    push!(critic_losses, w₂ * critic_loss)
+                end
 
                 loss
             end
@@ -528,5 +536,22 @@ function _update!(p::PPOPolicy, t::Any)
             break
         end
     end
+
+
+    # mean_actor_loss = mean(abs.(actor_losses))
+    # mean_critic_loss = mean(abs.(critic_losses))
+    # println("---")
+    # println(mean_actor_loss)
+    # println(mean_critic_loss)
+    
+
+    # actor_factor = clamp(0.5/mean_actor_loss, 0.9, 1.1)
+    # critic_factor = clamp(0.3/mean_critic_loss, 0.9, 1.1)
+    # println("changing actor weight from $(w₁) to $(w₁*actor_factor)")
+    # println("changing critic weight from $(w₂) to $(w₂*critic_factor)")
+    # p.actor_loss_weight = w₁ * actor_factor
+    # p.critic_loss_weight = w₂ * critic_factor
+
+    # println("---")
 end
 
