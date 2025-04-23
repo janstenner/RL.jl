@@ -76,7 +76,7 @@ function create_logσ(;logσ_is_network, ns, na, use_gpu, init, nna_scale, drop_
     return res
 end
 
-function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0)
+function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, noise = nothing, noise_scale = 90)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -86,6 +86,12 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
 
     ns = size(state_space)[1]
     na = size(action_space)[1]
+
+    if noise == "perlin"
+        noise_sampler = perlin_2d(; seed=Int(floor(rand(rng) * 1e12)))
+    else
+        noise_sampler = nothing
+    end
 
     Agent(
         policy = PPOPolicy(
@@ -117,6 +123,9 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
             start_steps = start_steps,
             start_policy = start_policy,
             target_kl = target_kl,
+            noise = noise,
+            noise_sampler = noise_sampler,
+            noise_scale = noise_scale,
         ),
         trajectory = 
         CircularArrayTrajectory(;
@@ -181,7 +190,13 @@ mutable struct PPOPolicy{A<:ActorCritic,D,R} <: AbstractPolicy
     start_steps
     start_policy
     target_kl
+    noise
+    noise_sampler
+    noise_scale
+    noise_step
     last_action_log_prob::Vector{Float32}
+    last_sigma::Vector{Float32}
+    last_mu::Vector{Float32}
 end
 
 function PPOPolicy(;
@@ -204,7 +219,11 @@ function PPOPolicy(;
     normalize_advantage = normalize_advantage,
     start_steps = -1,
     start_policy = nothing,
-    target_kl = 100.0
+    target_kl = 100.0,
+    noise = nothing,
+    noise_sampler = nothing,
+    noise_scale = 90.0,
+    noise_step = 0,
 )
     PPOPolicy{typeof(approximator),dist,typeof(rng)}(
         approximator,
@@ -226,6 +245,12 @@ function PPOPolicy(;
         start_steps,
         start_policy,
         target_kl,
+        noise,
+        noise_sampler,
+        noise_scale,
+        noise_step,
+        [0.0],
+        [0.0],
         [0.0],
     )
 end
@@ -289,7 +314,15 @@ function (p::PPOPolicy)(env::AbstractEnv)
         p.start_policy(env)
     else
         dist = prob(p, env)
-        action = rand.(p.rng, dist)
+
+        if isnothing(p.noise)
+            action = rand.(p.rng, dist)
+        else
+            norm_factor = float(pi / 20) #* 5
+            p.noise_step += 1
+            noise = [CoherentNoise.sample(p.noise_sampler, p.noise_step/p.noise_scale, float(π+2*i))/norm_factor for i in 1:size(dist.μ, 2)]
+            action = dist.μ + dist.σ .* noise'
+        end
 
         if p.clip1
             clamp!(action, -1.0, 1.0)
@@ -306,6 +339,8 @@ function (p::PPOPolicy)(env::AbstractEnv)
         end
 
         p.last_action_log_prob = log_p
+        p.last_mu = dist.μ[:]
+        p.last_sigma = dist.σ[:]
 
         action
     end

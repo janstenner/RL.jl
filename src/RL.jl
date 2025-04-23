@@ -28,6 +28,7 @@ using Transformers
 using Transformers.Layers
 using ChainRulesCore
 using Static
+using CoherentNoise
 
 
 
