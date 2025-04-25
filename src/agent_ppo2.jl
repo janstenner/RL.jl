@@ -355,6 +355,46 @@ end
 
 
 
+
+
+
+
+"""
+    sample_negatives_far(x_batch; m=size(x_batch,2), δ=0.1,
+                         max_attempts=1_000, sample_fn=()->randn(eltype(x_batch), size(x_batch,1)))
+
+Draw up to `m` vectors in ℝⁿ (same n as `x_batch`) so that each new vector is at least
+Euclidean distance `δ` from *every* column of `x_batch`.  By default samples
+from N(0,1). Throws an error if it fails `max_attempts` times for any sample.
+"""
+function sample_negatives_far(x_batch::AbstractMatrix{T};
+                              m::Int=size(x_batch,2),
+                              δ::Real=0.1,
+                              max_attempts::Int=1_000,
+                              sample_fn::Function=()->randn(eltype(x_batch), size(x_batch,1))) where {T}
+
+    δ2 = δ^2
+    x_neg = Vector{Vector{T}}() 
+
+    for i in 1:m
+        attempt = 0
+        while max_attempts > attempt
+            attempt += 1
+            cand = sample_fn()
+            # compute squared distances to every column in x_batch
+            d2 = sum((x_batch .- cand).^2; dims=1)
+            if minimum(d2) ≥ δ2
+                push!(x_neg, cand)
+                break
+            end
+        end
+    end
+
+    return hcat(x_neg...)
+end
+
+
+
 function _update!(p::PPOPolicy2, t::Any)
     rng = p.rng
     AC = p.approximator
@@ -436,6 +476,8 @@ function _update!(p::PPOPolicy2, t::Any)
                 AC.critic_state_tree = Flux.setup(AC.optimizer_critic, AC.critic)
             end
 
+            s_neg = sample_negatives_far(s)
+
             g_actor, g_critic = Flux.gradient(AC.actor, AC.critic) do actor, critic
                 v′ = critic(s) |> vec
                 if actor isa GaussianNetwork
@@ -471,13 +513,21 @@ function _update!(p::PPOPolicy2, t::Any)
                 excitement = ratio .* adv
                 fear = abs.((ratio .- 1)) .* p.fear_factor
 
+                if !(isempty(s_neg))
+                    v_neg = critic(s_neg)
+                    critic_regularization = 0.00006 * mean(v_neg)
+                else
+                    critic_regularization = 0.0f0
+                end
+
                 actor_loss = -mean(excitement - fear)
-                critic_loss = mean((r .- v′) .^ 2)
+                critic_loss = mean((r .- v′) .^ 2) + critic_regularization
                 loss = w₁ * actor_loss + w₂ * critic_loss - w₃ * entropy_loss
 
 
                 ignore() do
                     # println("---------------------")
+                    # println(mean(v_neg))
                     # println(mean(adv))
                     # println(mean(excitement))
                     # println(mean(fear))
