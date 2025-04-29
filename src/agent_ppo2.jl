@@ -639,14 +639,14 @@ function _update!(p::PPOPolicy2, t::Any)
         logσ_regularization_factor = clamp(0.1/mean_logσ_regularization_loss, 0.9, 1.1)
         critic_regularization_factor = clamp(0.3*mean_critic_loss/mean_critic_regularization_loss, 0.9, 1.1)
 
-        fear_factor_factor = clamp(((max_excitement * 0.04005) / (max_fear)), 0.5, 1.01)
+        #fear_factor_factor = clamp(((max_excitement * 0.04005) / (max_fear)), 0.5, 1.01)
 
         # println("changing actor weight from $(w₁) to $(w₁*actor_factor)")
         # println("changing critic weight from $(w₂) to $(w₂*critic_factor)")
         # println("changing entropy weight from $(w₃) to $(w₃*entropy_factor)")
         println("changing logσ regularization weight from $(w₅) to $(w₅*logσ_regularization_factor)")
         println("changing critic regularization weight from $(w₄) to $(w₄*critic_regularization_factor)")
-        println("changing fear factor from $(p.fear_factor) to $(p.fear_factor*fear_factor_factor)")
+        #println("changing fear factor from $(p.fear_factor) to $(p.fear_factor*fear_factor_factor)")
 
         println("current critic_target is $(p.critic_target)")
 
@@ -656,7 +656,7 @@ function _update!(p::PPOPolicy2, t::Any)
         p.logσ_regularization_loss_weight = w₅ * logσ_regularization_factor
         p.critic_regularization_loss_weight = w₄ * critic_regularization_factor
 
-        p.fear_factor = p.fear_factor * fear_factor_factor
+        #p.fear_factor = p.fear_factor * fear_factor_factor
     end
 
     println("---")
