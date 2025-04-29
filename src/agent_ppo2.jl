@@ -568,9 +568,9 @@ function _update!(p::PPOPolicy2, t::Any)
                     logσ_regularization  = 0.0f0
                 end
 
-                actor_loss = -mean((excitement - fear) .^2)
+                actor_loss = -mean(excitement - fear)
                 critic_loss = mean((r .- v′) .^ 2)
-                loss = w₁ * actor_loss + w₂ * critic_loss - w₃ * entropy_loss + w₄ * critic_regularization + w₅ * logσ_regularization
+                loss = w₁ * actor_loss + w₂ * critic_loss - w₃ * entropy_loss #+ w₄ * critic_regularization #+ w₅ * logσ_regularization
 
 
                 ignore() do
@@ -588,7 +588,7 @@ function _update!(p::PPOPolicy2, t::Any)
                     push!(fears, mean(fear))
 
                     # polyak update critic target
-                    p.critic_target = p.critic_target * 0.9 + mean(r) * 0.1
+                    p.critic_target = p.critic_target * 0.9 + (maximum(r) - 0.1) * 0.1
                 end
 
                 loss
@@ -637,22 +637,22 @@ function _update!(p::PPOPolicy2, t::Any)
         critic_factor = clamp(0.5/mean_critic_loss, 0.99, 1.01)
         entropy_factor = clamp(0.01/mean_entropy_loss, 0.99, 1.01)
         logσ_regularization_factor = clamp(0.1/mean_logσ_regularization_loss, 0.9, 1.1)
-        critic_regularization_factor = clamp(0.03/mean_critic_regularization_loss, 0.9, 1.1)
+        critic_regularization_factor = clamp(0.3*mean_critic_loss/mean_critic_regularization_loss, 0.9, 1.1)
 
-        fear_factor_factor = clamp(((max_excitement * 0.5) / (max_fear)), 0.5, 1.01)
+        fear_factor_factor = clamp(((max_excitement * 0.04005) / (max_fear)), 0.5, 1.01)
 
-        println("changing actor weight from $(w₁) to $(w₁*actor_factor)")
-        println("changing critic weight from $(w₂) to $(w₂*critic_factor)")
-        println("changing entropy weight from $(w₃) to $(w₃*entropy_factor)")
+        # println("changing actor weight from $(w₁) to $(w₁*actor_factor)")
+        # println("changing critic weight from $(w₂) to $(w₂*critic_factor)")
+        # println("changing entropy weight from $(w₃) to $(w₃*entropy_factor)")
         println("changing logσ regularization weight from $(w₅) to $(w₅*logσ_regularization_factor)")
         println("changing critic regularization weight from $(w₄) to $(w₄*critic_regularization_factor)")
         println("changing fear factor from $(p.fear_factor) to $(p.fear_factor*fear_factor_factor)")
 
         println("current critic_target is $(p.critic_target)")
 
-        p.actor_loss_weight = w₁ * actor_factor
-        p.critic_loss_weight = w₂ * critic_factor
-        p.entropy_loss_weight = w₃ * entropy_factor
+        # p.actor_loss_weight = w₁ * actor_factor
+        # p.critic_loss_weight = w₂ * critic_factor
+        # p.entropy_loss_weight = w₃ * entropy_factor
         p.logσ_regularization_loss_weight = w₅ * logσ_regularization_factor
         p.critic_regularization_loss_weight = w₄ * critic_regularization_factor
 
