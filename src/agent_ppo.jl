@@ -430,6 +430,8 @@ end
 
 
 function _update!(p::PPOPolicy, t::Any)
+    println("TRAIN!!!!!!!!")
+    
     rng = p.rng
     AC = p.approximator
     γ = p.γ
@@ -468,6 +470,10 @@ function _update!(p::PPOPolicy, t::Any)
     returns = to_device(advantages .+ select_last_dim(values, 1:n_rollout))
     advantages = to_device(advantages)
 
+    if p.normalize_advantage
+        advantages = (advantages .- mean(advantages)) ./ clamp(std(advantages), 1e-8, 1000.0)
+    end
+
     actions_flatten = flatten_batch(select_last_dim(t[:action], 1:n))
     action_log_probs = select_last_dim(to_device(t[:action_log_prob]), 1:n)
 
@@ -498,9 +504,7 @@ function _update!(p::PPOPolicy, t::Any)
 
             clamp!(log_p, log(1e-8), Inf) # clamp old_prob to 1e-5 to avoid inf
 
-            if p.normalize_advantage
-                adv = (adv .- mean(adv)) ./ clamp(std(adv), 1e-8, 1000.0)
-            end
+            
 
             if isnothing(AC.actor_state_tree)
                 AC.actor_state_tree = Flux.setup(AC.optimizer_actor, AC.actor)

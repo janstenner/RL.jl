@@ -942,3 +942,28 @@ function _update!(p::MATPolicy, t::Any)
     println("---")
 end
 
+
+function test_update(apprentice::MATPolicy, batch, μ_expert)
+    
+    na = size(apprentice.decoder.embedding.weight)[2]
+    
+    g_decoder = Flux.gradient(apprentice.decoder) do p_decoder
+
+        obsrep, val = apprentice.encoder(batch)
+
+        temp_act = cat(zeros(Float32,1,1,1),μ_expert[:,1:end-1,:],dims=2)
+
+        μ, logσ = p_decoder(temp_act, obsrep[:,:,:]) # Zeros do not work here
+
+
+        diff = μ - μ_expert
+        mse = mean(diff.^2)
+
+        Zygote.@ignore println(mse)
+
+        return mse
+    end
+
+    Flux.update!(apprentice.decoder_state_tree, apprentice.decoder, g_decoder[1])
+
+end
