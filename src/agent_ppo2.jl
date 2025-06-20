@@ -11,7 +11,7 @@ end
 
 @forward ActorCritic2.critic device
 
-function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, critic_regularization_loss_weight=0.01f0, logσ_regularization_loss_weight=0.01f0, adaptive_weights = true, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 1.0)
+function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, critic_regularization_loss_weight=0.01f0, logσ_regularization_loss_weight=0.01f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 1.0)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -39,7 +39,7 @@ function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, updat
                 ),
                 critic = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = false, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic),
                 optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate, betas)),
-                optimizer_sigma = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate * 0.01, betas)),
+                optimizer_sigma = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate * 0.1, betas)),
                 optimizer_critic = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate, betas)),
             ) : approximator,
             γ = y,
@@ -465,6 +465,10 @@ function _update!(p::PPOPolicy2, t::Any)
     returns = to_device(advantages .+ select_last_dim(values, 1:n_rollout))
     advantages = to_device(advantages)
 
+    if p.normalize_advantage
+        advantages = (advantages .- mean(advantages)) ./ clamp(std(advantages), 1e-8, 1000.0)
+    end
+
     actions_flatten = flatten_batch(select_last_dim(t[:action], 1:n))
     action_log_probs = select_last_dim(to_device(t[:action_log_prob]), 1:n)
 
@@ -501,9 +505,7 @@ function _update!(p::PPOPolicy2, t::Any)
 
             clamp!(log_p, log(1e-8), Inf) # clamp old_prob to 1e-8 to avoid inf
 
-            if p.normalize_advantage
-                adv = (adv .- mean(adv)) ./ clamp(std(adv), 1e-8, 1000.0)
-            end
+
 
             if isnothing(AC.actor_state_tree)
                 AC.actor_state_tree = Flux.setup(AC.optimizer_actor, AC.actor.μ)
@@ -517,7 +519,7 @@ function _update!(p::PPOPolicy2, t::Any)
                 AC.critic_state_tree = Flux.setup(AC.optimizer_critic, AC.critic)
             end
 
-            s_neg = sample_negatives_far(s)
+            # s_neg = sample_negatives_far(s)
 
             g_actor, g_critic = Flux.gradient(AC.actor, AC.critic) do actor, critic
                 v′ = critic(s) |> vec
@@ -554,19 +556,19 @@ function _update!(p::PPOPolicy2, t::Any)
                 excitement = ratio .* adv
                 fear = abs.((ratio .- 1)) .* p.fear_factor
 
-                if !(isempty(s_neg))
-                    v_neg = critic(s_neg)
-                    critic_regularization = mean((v_neg .- p.critic_target) .^ 2)
-                else
-                    critic_regularization = 0.0f0
-                end
+                # if !(isempty(s_neg))
+                #     v_neg = critic(s_neg)
+                #     critic_regularization = mean((v_neg .- p.critic_target) .^ 2)
+                # else
+                #     critic_regularization = 0.0f0
+                # end
 
-                if AC.actor.logσ_is_network
-                    logσ_neg = AC.actor.logσ(s_neg)
-                    logσ_regularization  = mean((logσ_neg .- log(AC.actor.max_σ)) .^ 2)	
-                else
-                    logσ_regularization  = 0.0f0
-                end
+                # if AC.actor.logσ_is_network
+                #     logσ_neg = AC.actor.logσ(s_neg)
+                #     logσ_regularization  = mean((logσ_neg .- log(AC.actor.max_σ)) .^ 2)	
+                # else
+                #     logσ_regularization  = 0.0f0
+                # end
 
                 actor_loss = -mean(excitement - fear)
                 critic_loss = mean((r .- v′) .^ 2)
@@ -581,8 +583,8 @@ function _update!(p::PPOPolicy2, t::Any)
                     push!(actor_losses, w₁ * actor_loss)
                     push!(critic_losses, w₂ * critic_loss)
                     push!(entropy_losses, -w₃ * entropy_loss)
-                    push!(critic_regularization_losses, w₄ * critic_regularization)
-                    push!(logσ_regularization_losses, w₅ * logσ_regularization)
+                    # push!(critic_regularization_losses, w₄ * critic_regularization)
+                    # push!(logσ_regularization_losses, w₅ * logσ_regularization)
 
                     push!(excitements, mean(excitement))
                     push!(fears, mean(fear))
@@ -610,53 +612,52 @@ function _update!(p::PPOPolicy2, t::Any)
     end
 
 
-    if p.adaptive_weights
-        # everything here is just magnitude (abs), not real mean
+    # everything here is just magnitude (abs), not real mean
 
-        mean_actor_loss = mean(abs.(actor_losses))
-        mean_critic_loss = mean(abs.(critic_losses))
-        mean_entropy_loss = mean(abs.(entropy_losses))
-        mean_logσ_regularization_loss = mean(abs.(logσ_regularization_losses))
-        mean_critic_regularization_loss = mean(abs.(critic_regularization_losses))
-        
-        println("---")
-        println("mean actor loss: $(mean_actor_loss)")
-        println("mean critic loss: $(mean_critic_loss)")
-        println("mean entropy loss: $(mean_entropy_loss)")
-        println("mean logσ regularization loss: $(mean_logσ_regularization_loss)")
-        println("mean critic regularization loss: $(mean_critic_regularization_loss)")
-
-        max_excitement = maximum(abs.(excitements))
-        max_fear = maximum(abs.(fears))
-        
-        println("max excitement: $(max_excitement)")
-        println("max fear: $(max_fear)")
+    mean_actor_loss = mean(abs.(actor_losses))
+    mean_critic_loss = mean(abs.(critic_losses))
+    mean_entropy_loss = mean(abs.(entropy_losses))
+    # mean_logσ_regularization_loss = mean(abs.(logσ_regularization_losses))
+    # mean_critic_regularization_loss = mean(abs.(critic_regularization_losses))
     
+    println("---")
+    println("mean actor loss: $(mean_actor_loss)")
+    println("mean critic loss: $(mean_critic_loss)")
+    println("mean entropy loss: $(mean_entropy_loss)")
+    # println("mean logσ regularization loss: $(mean_logσ_regularization_loss)")
+    # println("mean critic regularization loss: $(mean_critic_regularization_loss)")
 
-        actor_factor = clamp(1.0/mean_actor_loss, 0.99, 1.01)
-        critic_factor = clamp(0.5/mean_critic_loss, 0.99, 1.01)
-        entropy_factor = clamp(0.01/mean_entropy_loss, 0.99, 1.01)
-        logσ_regularization_factor = clamp(0.1/mean_logσ_regularization_loss, 0.9, 1.1)
-        critic_regularization_factor = clamp(0.3*mean_critic_loss/mean_critic_regularization_loss, 0.9, 1.1)
+    max_excitement = maximum(abs.(excitements))
+    max_fear = maximum(abs.(fears))
+    
+    println("max excitement: $(max_excitement)")
+    println("max fear: $(max_fear)")
 
-        #fear_factor_factor = clamp(((max_excitement * 0.04005) / (max_fear)), 0.5, 1.01)
+    if p.adaptive_weights
+        # actor_factor = clamp(1.0/mean_actor_loss, 0.99, 1.01)
+        # critic_factor = clamp(0.5/mean_critic_loss, 0.99, 1.01)
+        # entropy_factor = clamp(0.01/mean_entropy_loss, 0.99, 1.01)
+        # logσ_regularization_factor = clamp(0.1/mean_logσ_regularization_loss, 0.9, 1.1)
+        # critic_regularization_factor = clamp(0.3*mean_critic_loss/mean_critic_regularization_loss, 0.9, 1.1)
+
+        fear_factor_factor = clamp(((max_excitement * 0.04005) / (max_fear)), 0.5, 1.01)
 
         # println("changing actor weight from $(w₁) to $(w₁*actor_factor)")
         # println("changing critic weight from $(w₂) to $(w₂*critic_factor)")
         # println("changing entropy weight from $(w₃) to $(w₃*entropy_factor)")
-        println("changing logσ regularization weight from $(w₅) to $(w₅*logσ_regularization_factor)")
-        println("changing critic regularization weight from $(w₄) to $(w₄*critic_regularization_factor)")
-        #println("changing fear factor from $(p.fear_factor) to $(p.fear_factor*fear_factor_factor)")
+        # println("changing logσ regularization weight from $(w₅) to $(w₅*logσ_regularization_factor)")
+        # println("changing critic regularization weight from $(w₄) to $(w₄*critic_regularization_factor)")
+        println("changing fear factor from $(p.fear_factor) to $(p.fear_factor*fear_factor_factor)")
 
-        println("current critic_target is $(p.critic_target)")
+        # println("current critic_target is $(p.critic_target)")
 
         # p.actor_loss_weight = w₁ * actor_factor
         # p.critic_loss_weight = w₂ * critic_factor
         # p.entropy_loss_weight = w₃ * entropy_factor
-        p.logσ_regularization_loss_weight = w₅ * logσ_regularization_factor
-        p.critic_regularization_loss_weight = w₄ * critic_regularization_factor
+        # p.logσ_regularization_loss_weight = w₅ * logσ_regularization_factor
+        # p.critic_regularization_loss_weight = w₄ * critic_regularization_factor
 
-        #p.fear_factor = p.fear_factor * fear_factor_factor
+        p.fear_factor = p.fear_factor * fear_factor_factor
     end
 
     println("---")
