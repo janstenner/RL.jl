@@ -1,3 +1,56 @@
+Base.@kwdef mutable struct ModulationModule
+    # Configuration parameters
+    p_explore::Float32 = 1/80   # probability to enter explore mode each time step
+    min_amp::Float32    = 0.1    # minimum exploration amplitude
+    max_amp::Float32    = 1.2    # maximum exploration amplitude
+    min_width::Int      = 5      # minimum explore duration (in steps)
+    max_width::Int      = 80     # maximum explore duration (in steps)
+
+    # Internal state
+    state::Symbol       = :idle  # current mode (:idle or :explore)
+    last::Float32       = 0.0    # last output value
+
+    # Explore-mode parameters (set upon entering explore)
+    amp::Float32        = 1.0    # current amplitude
+    width::Int          = 0      # total duration of current explore burst
+    sigma::Float32      = 1.0    # Gaussian standard deviation
+    center::Float32     = 0.0    # Gaussian center
+    t::Int              = 0      # time step within current explore burst
+    min_value::Float32 = 0.1    # minimum value for the output
+end
+
+
+function (mm::ModulationModule)()
+    # mm.last = 1.0f0
+    # return mm.last
+
+    if mm.state == :idle
+        # In idle mode, output zero
+        mm.last = mm.min_value
+        # Possibly switch to explore
+        if rand() < mm.p_explore
+            mm.state  = :explore
+            mm.width  = rand(mm.min_width:mm.max_width)
+            mm.amp    = mm.min_amp + rand() * (mm.max_amp - mm.min_amp)
+            mm.sigma  = mm.width / 6
+            mm.center = mm.width / 2
+            mm.t      = 0
+        end
+
+    elseif mm.state == :explore
+        # Compute Gaussian-shaped output
+        mm.last = mm.min_value + mm.amp * exp(-((mm.t - mm.center)^2) / (2 * mm.sigma^2))
+        mm.t += 1
+        # Return to idle after the burst completes
+        if mm.t > mm.width
+            mm.state = :idle
+        end
+    end
+
+    return mm.last
+end
+
+
 Base.@kwdef mutable struct ActorCritic2{A,C}
     actor::A
     critic::C
@@ -28,6 +81,8 @@ function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, updat
         noise_sampler = nothing
     end
 
+    mm = ModulationModule()
+
     Agent(
         policy = PPOPolicy2(
             approximator = isnothing(approximator) ? ActorCritic2(
@@ -39,7 +94,7 @@ function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, updat
                 ),
                 critic = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = false, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic),
                 optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate, betas)),
-                optimizer_sigma = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate * 0.1, betas)),
+                optimizer_sigma = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate, betas)),
                 optimizer_critic = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate, betas)),
             ) : approximator,
             γ = y,
@@ -66,6 +121,7 @@ function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, updat
             noise_sampler = noise_sampler,
             noise_scale = noise_scale,
             fear_factor = fear_factor,
+            mm = mm,
         ),
         trajectory = 
         CircularArrayTrajectory(;
@@ -74,6 +130,7 @@ function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, updat
                 action = Float32 => (size(action_space)[1], n_envs),
                 action_log_prob = Float32 => (n_envs),
                 reward = Float32 => (n_envs),
+                explore_mod = Float32 => (n_envs),
                 terminal = Bool => (n_envs,),
                 next_values = Float32 => (1, n_envs),
         ),
@@ -138,6 +195,7 @@ mutable struct PPOPolicy2{A<:ActorCritic2,D,R} <: AbstractPolicy
     noise_scale
     noise_step
     fear_factor
+    mm
     critic_target
     last_action_log_prob::Vector{Float32}
     last_sigma::Vector{Float32}
@@ -173,6 +231,7 @@ function PPOPolicy2(;
     noise_scale = 90.0,
     noise_step = 0,
     fear_factor = 1.0f0,
+    mm = ModulationModule(),
     critic_target = 0.0f0,
 )
     PPOPolicy2{typeof(approximator),dist,typeof(rng)}(
@@ -203,6 +262,7 @@ function PPOPolicy2(;
         noise_scale,
         noise_step,
         fear_factor,
+        mm,
         critic_target,
         [0.0],
         [0.0],
@@ -262,13 +322,17 @@ function (p::PPOPolicy2)(env::MultiThreadEnv)
 end
 
 
-# !!! https://github.com/JuliaReinforcementLearning/ReinforcementLearning.jl/pull/533/files#r728920324
+
 function (p::PPOPolicy2)(env::AbstractEnv)
 
     if p.update_step <= p.start_steps
         p.start_policy(env)
     else
         dist = prob(p, env)
+
+        modulation_value = p.mm()
+        dist.σ .*= modulation_value
+        dist.σ .+= modulation_value * 0.25
 
         if isnothing(p.noise)
             action = rand.(p.rng, dist)
@@ -301,41 +365,11 @@ function (p::PPOPolicy2)(env::AbstractEnv)
     end
 end
 
-function (agent::Agent{<:PPOPolicy2})(env::MultiThreadEnv)
-
-    if agent.policy.update_step <= policy.start_steps
-        agent.policy.start_policy(env)
-    else
-        dist = prob(agent.policy, env)
-        action = rand.(agent.policy.rng, dist)
-        if ndims(action) == 2
-            action_log_prob = sum(logpdf.(dist, action), dims=1)
-        else
-            action_log_prob = sum(logpdf.(dist, action), dims=1)
-        end
-        EnrichedAction(action; action_log_prob=vec(action_log_prob))
-    end
-end
 
 
 
 
 
-
-function update!(
-    trajectory::AbstractTrajectory,
-    ::PPOPolicy2,
-    env::MultiThreadEnv,
-    ::PreActStage,
-    action::EnrichedAction,
-)
-    push!(
-        trajectory;
-        state=state(env),
-        action=action.action,
-        action_log_prob=action.action_log_prob
-    )
-end
 
 
 function update!(
@@ -347,9 +381,10 @@ function update!(
 )
     push!(
         trajectory;
-        state=state(env),
-        action=action,
-        action_log_prob=policy.last_action_log_prob
+        state = state(env),
+        action = action,
+        action_log_prob = policy.last_action_log_prob,
+        explore_mod = policy.mm.last,
     )
 end
 
@@ -471,6 +506,7 @@ function _update!(p::PPOPolicy2, t::Any)
 
     actions_flatten = flatten_batch(select_last_dim(t[:action], 1:n))
     action_log_probs = select_last_dim(to_device(t[:action_log_prob]), 1:n)
+    explore_mod = to_device(t[:explore_mod])
 
     stop_update = false
 
@@ -494,6 +530,7 @@ function _update!(p::PPOPolicy2, t::Any)
             # !!! we need to convert it into a continuous CuArray otherwise CUDA.jl will complain scalar indexing
             s = to_device(collect(select_last_dim(states_flatten_on_host, inds)))
             a = to_device(collect(select_last_dim(actions_flatten, inds)))
+            exp_m = to_device(collect(select_last_dim(explore_mod, inds)))
 
             if eltype(a) === Int
                 a = CartesianIndex.(a, 1:length(a))
@@ -523,25 +560,21 @@ function _update!(p::PPOPolicy2, t::Any)
 
             g_actor, g_critic = Flux.gradient(AC.actor, AC.critic) do actor, critic
                 v′ = critic(s) |> vec
-                if actor isa GaussianNetwork
-                    μ, logσ = actor(s)
-                    
-                    if ndims(a) == 2
-                        log_p′ₐ = vec(sum(normlogpdf(μ, exp.(logσ), a), dims=1))
-                    else
-                        log_p′ₐ = normlogpdf(μ, exp.(logσ), a)
-                    end
-                    entropy_loss =
-                        mean(size(logσ, 1) * (log(2.0f0π) + 1) .+ sum(logσ; dims=1)) / 2
-                else
-                    # actor is assumed to return discrete logits
-                    logit′ = actor(s)
+                
+                μ, logσ = actor(s)
 
-                    p′ = softmax(logit′)
-                    log_p′ = logsoftmax(logit′)
-                    log_p′ₐ = log_p′[a]
-                    entropy_loss = -sum(p′ .* log_p′) * 1 // size(p′, 2)
+                σ = (exp.(logσ) .* exp_m) .+ (exp_m .* 0.25)
+
+                if ndims(a) == 2
+                    log_p′ₐ = vec(sum(normlogpdf(μ, σ, a), dims=1))
+                else
+                    log_p′ₐ = normlogpdf(μ, σ, a)
                 end
+
+                #clamp!(log_p′ₐ, log(1e-8), Inf)
+
+                entropy_loss = mean(size(logσ, 1) * (log(2.0f0π) + 1) .+ sum(logσ; dims=1)) / 2
+                
                 ratio = exp.(log_p′ₐ .- log_p)
 
                 ignore() do
@@ -553,8 +586,7 @@ function _update!(p::PPOPolicy2, t::Any)
                     end
                 end
 
-                excitement = ratio .* adv
-                fear = abs.((ratio .- 1)) .* p.fear_factor
+                fear = (abs.((ratio .- 1)) + ones(size(ratio))).^1.3 .* p.fear_factor
 
                 # if !(isempty(s_neg))
                 #     v_neg = critic(s_neg)
@@ -570,8 +602,14 @@ function _update!(p::PPOPolicy2, t::Any)
                 #     logσ_regularization  = 0.0f0
                 # end
 
-                actor_loss = -mean(excitement - fear)
-                critic_loss = mean((r .- v′) .^ 2)
+                actor_loss = -mean(((ratio .* adv) - fear)) # .* exp_m[:])
+
+                # surr1 = ratio .* adv
+                # surr2 = clamp.(ratio, 1.0f0 - clip_range, 1.0f0 + clip_range) .* adv
+
+                # actor_loss = -mean(min.(surr1, surr2) .* exp_m[:])
+
+                critic_loss = mean(((r .- v′) .^ 2)) # .* exp_m[:])
                 loss = w₁ * actor_loss + w₂ * critic_loss - w₃ * entropy_loss #+ w₄ * critic_regularization #+ w₅ * logσ_regularization
 
 
@@ -586,8 +624,8 @@ function _update!(p::PPOPolicy2, t::Any)
                     # push!(critic_regularization_losses, w₄ * critic_regularization)
                     # push!(logσ_regularization_losses, w₅ * logσ_regularization)
 
-                    push!(excitements, mean(excitement))
-                    push!(fears, mean(fear))
+                    push!(excitements, maximum(adv))
+                    push!(fears, maximum(fear))
 
                     # polyak update critic target
                     p.critic_target = p.critic_target * 0.9 + (maximum(r) - 0.1) * 0.1
@@ -640,14 +678,17 @@ function _update!(p::PPOPolicy2, t::Any)
         # logσ_regularization_factor = clamp(0.1/mean_logσ_regularization_loss, 0.9, 1.1)
         # critic_regularization_factor = clamp(0.3*mean_critic_loss/mean_critic_regularization_loss, 0.9, 1.1)
 
-        fear_factor_factor = clamp(((max_excitement * 0.04005) / (max_fear)), 0.5, 1.01)
+        # fear_factor_factor = clamp(((max_excitement * 0.04005) / (max_fear)), 0.5, 1.01)
+
+        new_factor_factor = max_excitement * 0.01
+
 
         # println("changing actor weight from $(w₁) to $(w₁*actor_factor)")
         # println("changing critic weight from $(w₂) to $(w₂*critic_factor)")
         # println("changing entropy weight from $(w₃) to $(w₃*entropy_factor)")
         # println("changing logσ regularization weight from $(w₅) to $(w₅*logσ_regularization_factor)")
         # println("changing critic regularization weight from $(w₄) to $(w₄*critic_regularization_factor)")
-        println("changing fear factor from $(p.fear_factor) to $(p.fear_factor*fear_factor_factor)")
+        println("changing fear factor from $(p.fear_factor) to $(p.fear_factor * 0.9 + new_factor_factor * 0.1)")
 
         # println("current critic_target is $(p.critic_target)")
 
@@ -657,7 +698,8 @@ function _update!(p::PPOPolicy2, t::Any)
         # p.logσ_regularization_loss_weight = w₅ * logσ_regularization_factor
         # p.critic_regularization_loss_weight = w₄ * critic_regularization_factor
 
-        p.fear_factor = p.fear_factor * fear_factor_factor
+        # polyak update fear_factor
+        p.fear_factor = p.fear_factor * 0.9 + new_factor_factor * 0.1
     end
 
     println("---")
