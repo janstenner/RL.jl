@@ -226,13 +226,16 @@ function generalized_advantage_estimation(
     λ::T;
     kwargs...,
 ) where {T<:Number}
-    res = similar(rewards, promote_type(eltype(rewards), T))
-    generalized_advantage_estimation!(res, rewards, values, next_values, γ, λ; kwargs...)
-    res
+    advantages = similar(rewards, promote_type(eltype(rewards), T))
+    returns = similar(rewards, promote_type(eltype(rewards), T))
+    generalized_advantage_estimation!(advantages, returns, rewards, values, next_values, γ, λ; kwargs...)
+    
+    advantages, returns
 end
 
 generalized_advantage_estimation!(
     advantages,
+    returns,
     rewards,
     values,
     next_values,
@@ -240,10 +243,11 @@ generalized_advantage_estimation!(
     λ;
     terminal = nothing,
     dims = :,
-) = _generalized_advantage_estimation!(advantages, rewards, values, next_values, γ, λ, terminal, dims)
+) = _generalized_advantage_estimation!(advantages, returns, rewards, values, next_values, γ, λ, terminal, dims)
 
 function _generalized_advantage_estimation!(
     advantages::AbstractMatrix,
+    returns::AbstractMatrix,
     rewards::AbstractMatrix,
     values::AbstractMatrix,
     next_values::AbstractMatrix,
@@ -253,19 +257,21 @@ function _generalized_advantage_estimation!(
     dims::Int,
 )
     dims = ndims(rewards) - dims + 1
-    for (r′, r, v, nv) in zip(
+    for (adv, ret, r, v, nv) in zip(
         eachslice(advantages, dims = dims),
+        eachslice(returns, dims = dims),
         eachslice(rewards, dims = dims),
         eachslice(values, dims = dims),
         eachslice(next_values, dims = dims),
     )
-        _generalized_advantage_estimation!(r′, r, v, nv, γ, λ, nothing)
+        _generalized_advantage_estimation!(adv, ret, r, v, nv, γ, λ, nothing)
     end
 end
 
 
 function _generalized_advantage_estimation!(
     advantages::AbstractMatrix,
+    returns::AbstractMatrix,
     rewards::AbstractMatrix,
     values::AbstractMatrix,
     next_values::AbstractMatrix,
@@ -275,19 +281,21 @@ function _generalized_advantage_estimation!(
     dims::Int,
 )
     dims = ndims(rewards) - dims + 1
-    for (r′, r, v, nv, t) in zip(
+    for (adv, ret, r, v, nv, t) in zip(
         eachslice(advantages, dims = dims),
+        eachslice(returns, dims = dims),
         eachslice(rewards, dims = dims),
         eachslice(values, dims = dims),
         eachslice(next_values, dims = dims),
         eachslice(terminal, dims = dims),
     )
-        _generalized_advantage_estimation!(r′, r, v, nv, γ, λ, t)
+        _generalized_advantage_estimation!(adv, ret, r, v, nv, γ, λ, t)
     end
 end
 
 _generalized_advantage_estimation!(
     advantages::AbstractVector,
+    returns::AbstractVector,
     rewards::AbstractVector,
     values::AbstractVector,
     next_values::AbstractVector,
@@ -295,11 +303,11 @@ _generalized_advantage_estimation!(
     λ,
     terminal,
     dims,
-) = _generalized_advantage_estimation!(advantages, rewards, values, next_values, γ, λ, terminal)
+) = _generalized_advantage_estimation!(advantages, returns, rewards, values, next_values, γ, λ, terminal)
 
 
 "assuming rewards and advantages are Vector"
-function _generalized_advantage_estimation!(advantages, rewards, values, next_values, γ, λ, terminal)
+function _generalized_advantage_estimation!(advantages, returns, rewards, values, next_values, γ, λ, terminal)
     gae = 0.0f0
 
     for i in length(rewards):-1:1
@@ -307,9 +315,15 @@ function _generalized_advantage_estimation!(advantages, rewards, values, next_va
         delta = rewards[i] + γ * next_values[i] * is_continue - values[i]
         gae = delta + γ * λ * is_continue * gae
         advantages[i] = gae
+
+        if i == length(rewards)
+            returns[i] = rewards[i] + γ * next_values[i]
+        else
+            returns[i] = rewards[i] + γ * returns[i + 1] * is_continue
+        end
     end
 
-    advantages
+    return advantages, returns
 end
 
 

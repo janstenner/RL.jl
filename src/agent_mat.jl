@@ -755,7 +755,7 @@ function _update!(p::MATPolicy, t::Any)
         terminal = terminal[1,:]
     end
 
-    advantages = generalized_advantage_estimation(
+    advantages, _ = generalized_advantage_estimation(
         rewards,
         values,
         next_values,

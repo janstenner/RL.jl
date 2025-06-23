@@ -1,6 +1,6 @@
 Base.@kwdef mutable struct ModulationModule
     # Configuration parameters
-    p_explore::Float32 = 1/80   # probability to enter explore mode each time step
+    p_explore::Float32 = 1/140   # probability to enter explore mode each time step
     min_amp::Float32    = 0.1    # minimum exploration amplitude
     max_amp::Float32    = 1.2    # maximum exploration amplitude
     min_width::Int      = 5      # minimum explore duration (in steps)
@@ -16,7 +16,7 @@ Base.@kwdef mutable struct ModulationModule
     sigma::Float32      = 1.0    # Gaussian standard deviation
     center::Float32     = 0.0    # Gaussian center
     t::Int              = 0      # time step within current explore burst
-    min_value::Float32 = 0.1    # minimum value for the output
+    min_value::Float32 = 0.0    # minimum value for the output
 end
 
 
@@ -488,7 +488,7 @@ function _update!(p::PPOPolicy2, t::Any)
     values = reshape(send_to_host(AC.critic(flatten_batch(states))), n_envs, :)
     next_values = reshape(flatten_batch(t[:next_values]), n_envs, :)
 
-    advantages = generalized_advantage_estimation(
+    advantages, returns = generalized_advantage_estimation(
         t[:reward],
         values,
         next_values,
@@ -497,12 +497,12 @@ function _update!(p::PPOPolicy2, t::Any)
         dims=2,
         terminal=t[:terminal]
     )
-    returns = to_device(advantages .+ select_last_dim(values, 1:n_rollout))
+    # returns = to_device(advantages .+ select_last_dim(values, 1:n_rollout))
     advantages = to_device(advantages)
 
-    if p.normalize_advantage
-        advantages = (advantages .- mean(advantages)) ./ clamp(std(advantages), 1e-8, 1000.0)
-    end
+    # if p.normalize_advantage
+    #     advantages = (advantages .- mean(advantages)) ./ clamp(std(advantages), 1e-8, 1000.0)
+    # end
 
     actions_flatten = flatten_batch(select_last_dim(t[:action], 1:n))
     action_log_probs = select_last_dim(to_device(t[:action_log_prob]), 1:n)
@@ -541,6 +541,10 @@ function _update!(p::PPOPolicy2, t::Any)
             adv = vec(advantages)[inds]
 
             clamp!(log_p, log(1e-8), Inf) # clamp old_prob to 1e-8 to avoid inf
+
+            if p.normalize_advantage
+                adv = (adv .- mean(adv)) ./ clamp(std(adv), 1e-8, 1000.0)
+            end
 
 
 
