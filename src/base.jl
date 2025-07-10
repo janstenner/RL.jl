@@ -317,7 +317,7 @@ function _generalized_advantage_estimation!(advantages, returns, rewards, values
         advantages[i] = gae
 
         if i == length(rewards)
-            returns[i] = rewards[i] + γ * next_values[i]
+            returns[i] = rewards[i] + γ * next_values[i] * is_continue
         else
             returns[i] = rewards[i] + γ * returns[i + 1] * is_continue
         end

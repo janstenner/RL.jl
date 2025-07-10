@@ -371,6 +371,10 @@ function (p::PPOPolicy2)(env::AbstractEnv)
         dist.σ .*= modulation_value
         #dist.σ .+= modulation_value * 0.25
 
+        if p.clip1
+            clamp!(dist.μ, -1.0, 1.0)
+        end
+
         if isnothing(p.noise)
             action = rand.(p.rng, dist)
         else
@@ -525,7 +529,11 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
     next_states_flatten_on_host = flatten_batch(select_last_dim(t[:next_states], 1:n))
 
     values = reshape(send_to_host(AC.critic(flatten_batch(states))), n_envs, :)
-    next_values = values .+ reshape(send_to_host( AC.critic2( vcat(flatten_batch(states), flatten_batch(actions)) )) , n_envs, :)
+
+    mus = AC.actor.μ(states_flatten_on_host)
+    offsets = reshape(send_to_host( AC.critic2( vcat(flatten_batch(states), mus) )) , n_envs, :)
+
+    next_values = values + reshape(send_to_host( AC.critic2( vcat(flatten_batch(states), flatten_batch(actions)) )) , n_envs, :) - offsets
 
     advantages, returns = generalized_advantage_estimation(
         t[:reward],
