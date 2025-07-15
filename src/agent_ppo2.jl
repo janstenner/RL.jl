@@ -1,8 +1,8 @@
 Base.@kwdef mutable struct ModulationModule
     # Configuration parameters
-    p_explore::Float32 = 1/40   # probability to enter explore mode each time step
-    min_amp::Float32    = 0.1    # minimum exploration amplitude
-    max_amp::Float32    = 1.2    # maximum exploration amplitude
+    p_explore::Float32 = 1/50   # probability to enter explore mode each time step
+    min_amp::Float32    = 0.4    # minimum exploration amplitude
+    max_amp::Float32    = 1.4    # maximum exploration amplitude
     min_width::Int      = 5      # minimum explore duration (in steps)
     max_width::Int      = 80     # maximum explore duration (in steps)
 
@@ -51,6 +51,60 @@ function (mm::ModulationModule)()
 end
 
 
+mutable struct PopArt
+    dense      # die letzte Dense‑Schicht (beliebiger Typ, z. B. Flux.Dense)
+    μ          # laufender Mittelwert der Targets (beliebiger Float‑Typ)
+    σ          # laufende Standardabweichung (beliebiger Float‑Typ)
+    β          # Glättungsfaktor für die Statistik (beliebiger Float‑Typ)
+end
+
+
+function PopArt(in_dim; β=1e-3, init=glorot_uniform)
+    dense_layer = Dense(in_dim, 1; init=init)
+    return PopArt(dense_layer, 0.0, 1.0, β)
+end
+
+# ────────────────────────────────────────────────────────────────────────────
+# Functor‑Definition: damit Flux.params und gradient() wissen, welche Felder
+# sie traversieren sollen. μ und σ werden hier nicht als trainierbar markiert!
+# ────────────────────────────────────────────────────────────────────────────
+Flux.@functor PopArt
+
+# Wir überschreiben, welche Felder wirklich trainiert werden:
+Flux.trainable(p::PopArt) = (; dense = p.dense)
+
+
+function (p::PopArt)(x)
+    ŷ̃ = p.dense(x)          # interne "normierte" Vorhersage
+    return p.σ .* ŷ̃ .+ p.μ  # unnormierter Output
+end
+
+# ────────────────────────────────────────────────────────────────────────────
+# Statistik‑Update + Preserve‑Rescale
+# Aufruf: update!(popart_layer, target_vector)
+# ────────────────────────────────────────────────────────────────────────────
+function update!(p::PopArt, targets)
+    # Alte Werte sichern
+    μ_old, σ_old = p.μ, p.σ
+
+    # 1) Batch‑Statistiken
+    batch_mean = mean(targets)
+    batch_var  = mean((targets .- batch_mean).^2)
+
+    # 2) Exponentiell gleitende Updates
+    p.μ += p.β * (batch_mean - p.μ)
+    p.σ = sqrt((1 - p.β) * (p.σ^2) + p.β * batch_var)
+
+    # 3) Preserve‑Rescale der Dense‑Gewichte
+    #    Damit bleibt σ_old * ŷ̃ + μ_old == p.σ * ŷ̃ + p.μ
+    scale = σ_old / p.σ
+    p.dense.weight .*= scale
+    p.dense.bias .= (σ_old .* p.dense.bias .+ μ_old .- p.μ) ./ p.σ
+
+    return nothing
+end
+
+
 Base.@kwdef mutable struct ActorCritic2{A,C,C2}
     actor::A
     critic::C # value function approximator
@@ -67,20 +121,27 @@ end
 
 @forward ActorCritic2.critic device
 
-function create_critic2(;ns, na, use_gpu, init, nna_scale, drop_middle_layer, fun = relu)
+function create_critic_PPO2(;ns, na, use_gpu, init, nna_scale, drop_middle_layer, fun = relu, is_critic2 = false)
     nna_size_critic = Int(floor(20 * nna_scale))
 
+    if is_critic2
+        input_size = ns + na
+    else
+        input_size = ns
+    end
     
     if drop_middle_layer
         n = Chain(
-            Dense(ns + na, nna_size_critic, fun; init = init),
-            Dense(nna_size_critic, 1; init = init),
+            Dense(input_size, nna_size_critic, fun; init = init),
+            #Dense(nna_size_critic, 1; init = init),
+            PopArt(nna_size_critic; init = init)
         )
     else
         n = Chain(
-            Dense(ns + na, nna_size_critic, fun; init = init),
+            Dense(input_size, nna_size_critic, fun; init = init),
             Dense(nna_size_critic, nna_size_critic, fun; init = init),
-            Dense(nna_size_critic, 1; init = init),
+            #Dense(nna_size_critic, 1; init = init),
+            PopArt(nna_size_critic; init = init)
         )
     end
 
@@ -119,10 +180,10 @@ function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, updat
                     logσ_is_network = logσ_is_network,
                     max_σ = max_σ
                 ),
-                critic = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = false, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic),
-                critic2 = create_critic2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic),
-                optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate, betas)),
-                optimizer_sigma = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate, betas)),
+                critic = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic),
+                critic2 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic, is_critic2 = true),
+                optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate/10, betas)),
+                optimizer_sigma = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate/10, betas)),
                 optimizer_critic = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate, betas)),
                 optimizer_critic2 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate, betas)),
             ) : approximator,
@@ -500,6 +561,19 @@ function sample_negatives_far(x_batch::AbstractMatrix{T};
 end
 
 
+function prepare_values(values, terminal)
+    offset_value = 0.0
+
+    for i in length(values):-1:1
+        if terminal[i]
+            offset_value = values[i]
+        end
+        values[i] -= offset_value
+    end
+
+    return values
+end
+
 
 function _update!(p::PPOPolicy2, t::Any; IL=false)
     rng = p.rng
@@ -530,6 +604,8 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
 
     values = reshape(send_to_host(AC.critic(flatten_batch(states))), n_envs, :)
 
+    #values = prepare_values(values, t[:terminal])
+
     mus = AC.actor.μ(states_flatten_on_host)
     offsets = reshape(send_to_host( AC.critic2( vcat(flatten_batch(states), mus) )) , n_envs, :)
 
@@ -545,6 +621,7 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
         terminal=t[:terminal]
     )
     # returns = to_device(advantages .+ select_last_dim(values, 1:n_rollout))
+    advantages = next_values - values
     advantages = to_device(advantages)
 
     # if p.normalize_advantage
@@ -566,6 +643,20 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
 
     excitements = Float32[]
     fears = Float32[]
+
+
+
+
+
+    if p.update_step % (p.update_freq * 50) == 0 || isnothing(AC.actor_state_tree) || isnothing(AC.sigma_state_tree) || isnothing(AC.critic_state_tree) || isnothing(AC.critic2_state_tree)
+        println("________________________________________________________________________")
+        println("Reset Optimizers")
+        println("________________________________________________________________________")
+        AC.actor_state_tree = Flux.setup(AC.optimizer_actor, AC.actor.μ)
+        AC.sigma_state_tree = Flux.setup(AC.optimizer_sigma, AC.actor.logσ)
+        AC.critic_state_tree = Flux.setup(AC.optimizer_critic, AC.critic)
+        AC.critic2_state_tree = Flux.setup(AC.optimizer_critic2, AC.critic2)
+    end
 
     for epoch in 1:n_epochs
 
@@ -589,28 +680,12 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
             log_p = vec(action_log_probs)[inds]
             adv = vec(advantages)[inds]
 
+            rew = vec(t[:reward])[inds]
+
             clamp!(log_p, log(1e-8), Inf) # clamp old_prob to 1e-8 to avoid inf
 
             if p.normalize_advantage
                 adv = (adv .- mean(adv)) ./ clamp(std(adv), 1e-8, 1000.0)
-            end
-
-
-
-            if isnothing(AC.actor_state_tree)
-                AC.actor_state_tree = Flux.setup(AC.optimizer_actor, AC.actor.μ)
-            end
-
-            if isnothing(AC.sigma_state_tree)
-                AC.sigma_state_tree = Flux.setup(AC.optimizer_sigma, AC.actor.logσ)
-            end
-
-            if isnothing(AC.critic_state_tree)
-                AC.critic_state_tree = Flux.setup(AC.optimizer_critic, AC.critic)
-            end
-
-            if isnothing(AC.critic2_state_tree)
-                AC.critic2_state_tree = Flux.setup(AC.optimizer_critic2, AC.critic2)
             end
 
             # s_neg = sample_negatives_far(s)
@@ -713,15 +788,18 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
                 break
             end
 
+            update!(AC.critic.layers[end], r) 
+
+            v′ = AC.critic(s) |> vec
+            nv′ = AC.critic(ns) |> vec
+
             g_critic2 = Flux.gradient(AC.critic2) do critic2
-                v′ = AC.critic(s) |> vec
-                nv′ = AC.critic(ns) |> vec
-                offsets = critic2(vcat(s,a)) |> vec
+                critic2_values = critic2(vcat(s,a)) |> vec
 
                 if IL
                     critic2_loss = 0.0
                 else
-                    critic2_loss = mean(((offsets .- (nv′ - v′)) .^ 2)) # .* exp_m[:])
+                    critic2_loss = mean(((critic2_values .- (rew + γ * nv′ - v′)) .^ 2)) # .* exp_m[:])
                 end
 
                 ignore() do
@@ -732,6 +810,8 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
             end
 
             Flux.update!(AC.critic2_state_tree, AC.critic2, g_critic2[1])
+
+            update!(AC.critic2.layers[end], rew + γ * nv′ - v′) 
 
         end
 
@@ -758,10 +838,10 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
     # println("mean logσ regularization loss: $(mean_logσ_regularization_loss)")
     # println("mean critic regularization loss: $(mean_critic_regularization_loss)")
 
-    max_excitement = maximum(abs.(excitements))
+    mean_excitement = mean(abs.(excitements))
     max_fear = maximum(abs.(fears))
     
-    println("max excitement: $(max_excitement)")
+    println("mean excitement: $(mean_excitement)")
     println("max fear: $(max_fear)")
 
     if p.adaptive_weights
@@ -773,7 +853,7 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
 
         # fear_factor_factor = clamp(((max_excitement * 0.04005) / (max_fear)), 0.5, 1.01)
 
-        new_factor_factor = max_excitement * p.fear_scale
+        new_factor_factor = mean_excitement * p.fear_scale
 
 
         # println("changing actor weight from $(w₁) to $(w₁*actor_factor)")
