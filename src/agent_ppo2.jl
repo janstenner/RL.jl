@@ -1,10 +1,10 @@
 Base.@kwdef mutable struct ModulationModule
     # Configuration parameters
-    p_explore::Float32 = 1/50   # probability to enter explore mode each time step
+    p_explore::Float32 = 1/150   # probability to enter explore mode each time step
     min_amp::Float32    = 0.4    # minimum exploration amplitude
     max_amp::Float32    = 1.4    # maximum exploration amplitude
     min_width::Int      = 5      # minimum explore duration (in steps)
-    max_width::Int      = 80     # maximum explore duration (in steps)
+    max_width::Int      = 30     # maximum explore duration (in steps)
 
     # Internal state
     state::Symbol       = :idle  # current mode (:idle or :explore)
