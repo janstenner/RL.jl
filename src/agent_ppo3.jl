@@ -40,6 +40,27 @@ Base.@kwdef mutable struct PPOPolicy3 <: AbstractPolicy
 end
 
 
+Base.@kwdef mutable struct ActorCritic3{A,C,C2,C3}
+    actor::A
+    critic::C # value function approximator
+    critic2::C2 # action value function approximator minus r
+    critic3::C3 # value function approximator for exploration
+    optimizer_actor = ADAM()
+    optimizer_sigma = ADAM()
+    optimizer_critic = ADAM()
+    optimizer_critic2 = ADAM()
+    optimizer_critic3 = ADAM()
+    actor_state_tree = nothing
+    sigma_state_tree = nothing
+    critic_state_tree = nothing
+    critic2_state_tree = nothing
+    critic3_state_tree = nothing
+end
+
+@forward ActorCritic3.critic device
+
+
+
 function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, critic_regularization_loss_weight=0.01f0, logσ_regularization_loss_weight=0.01f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 1.0, fear_scale = 0.5, new_loss = true, update_freq_no_exploration = 256)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
@@ -61,7 +82,7 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
 
     Agent(
         policy = PPOPolicy3(
-            approximator = isnothing(approximator) ? ActorCritic2(
+            approximator = isnothing(approximator) ? ActorCritic3(
                 actor = GaussianNetwork(
                     μ = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = tanh_end),
                     logσ = create_logσ(logσ_is_network = logσ_is_network, ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, start_logσ = start_logσ),
@@ -70,10 +91,12 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
                 ),
                 critic = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic),
                 critic2 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic, is_critic2 = true),
-                optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate/5, betas)),
+                critic3 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic),
+                optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate/4, betas)),
                 optimizer_sigma = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate, betas)),
                 optimizer_critic = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate, betas)),
                 optimizer_critic2 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate, betas)),
+                optimizer_critic3 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate, betas)),
             ) : approximator,
             trajectory_no_exploration = CircularArrayTrajectory(;
                 capacity = update_freq_no_exploration,
@@ -379,6 +402,7 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
     n_microbatches = p.n_microbatches
     clip_range = p.clip_range
     w₁ = p.actor_loss_weight
+    w₂ = p.critic_loss_weight
     w₃ = p.entropy_loss_weight
     D = device(AC)
     to_device(x) = send_to_device(D, x)
@@ -417,6 +441,7 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
 
     actor_losses = Float32[]
     critic2_losses = Float32[]
+    critic3_losses = Float32[]
     entropy_losses = Float32[]
 
     excitements = Float32[]
@@ -431,6 +456,7 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
         AC.actor_state_tree = Flux.setup(AC.optimizer_actor, AC.actor.μ)
         AC.sigma_state_tree = Flux.setup(AC.optimizer_sigma, AC.actor.logσ)
         AC.critic2_state_tree = Flux.setup(AC.optimizer_critic2, AC.critic2)
+        AC.critic3_state_tree = Flux.setup(AC.optimizer_critic3, AC.critic3)
     end
 
     # AC.critic2_state_tree = Flux.setup(AC.optimizer_critic2, AC.critic2)
@@ -453,6 +479,7 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
 
             log_p = vec(action_log_probs)[inds]
             adv = vec(advantages)[inds]
+            ret = vec(returns)[inds]
 
             clamp!(log_p, log(1e-8), Inf) # clamp old_prob to 1e-8 to avoid inf
 
@@ -462,7 +489,9 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
 
             # s_neg = sample_negatives_far(s)
 
-            g_actor, g_critic = Flux.gradient(AC.actor, AC.critic) do actor, critic
+            g_actor, g_critic3 = Flux.gradient(AC.actor, AC.critic3) do actor, critic3
+
+                v′ = critic3(s) |> vec
 
                 μ, logσ = actor(s)
 
@@ -500,13 +529,20 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
                     actor_loss = -mean(min.(surr1, surr2))
                 end
 
+                if IL
+                    critic3_loss = 0.0
+                else
+                    critic3_loss = mean(((ret .- v′) .^ 2))
+                end
 
-                loss = w₁ * actor_loss - w₃ * entropy_loss
+
+                loss = w₁ * actor_loss + w₂ * critic3_loss - w₃ * entropy_loss
 
 
                 ignore() do
                     push!(actor_losses, w₁ * actor_loss)
                     push!(entropy_losses, -w₃ * entropy_loss)
+                    push!(critic3_losses, w₂ * critic3_loss)
 
                     push!(excitements, maximum(adv))
                     push!(fears, maximum(fear))
@@ -518,13 +554,13 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
             if !stop_update
                 Flux.update!(AC.actor_state_tree, AC.actor.μ, g_actor.μ)
                 # Flux.update!(AC.sigma_state_tree, AC.actor.logσ, g_actor.logσ)
+                Flux.update!(AC.critic3_state_tree, AC.critic3, g_critic3)
             else
                 break
             end
 
             v′ = AC.critic(s) |> vec
-            nv′ = AC.critic(ns) |> vec
-            ret = vec(returns)[inds]
+            nv′ = AC.critic3(ns) |> vec
             rew = vec(t[:reward])[inds]
 
             g_critic2 = Flux.gradient(AC.critic2) do critic2
@@ -533,19 +569,19 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
                 if IL
                     critic2_loss = 0.0
                 else
-                    critic2_loss = mean(((critic2_values .- (ret - v′)) .^ 2))
+                    critic2_loss = mean(((critic2_values .- (rew + γ * nv′ - v′)) .^ 2))
                 end
 
                 ignore() do
-                    push!(critic2_losses, critic2_loss)
+                    push!(critic2_losses, w₂ * critic2_loss)
                 end
 
-                critic2_loss
+                w₂ * critic2_loss
             end
 
             Flux.update!(AC.critic2_state_tree, AC.critic2, g_critic2[1])
 
-            update!(AC.critic2.layers[end], ret - v′) 
+            update!(AC.critic2.layers[end], rew + γ * nv′ - v′) 
 
         end
 
