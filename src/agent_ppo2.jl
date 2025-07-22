@@ -1,10 +1,10 @@
 Base.@kwdef mutable struct ModulationModule
     # Configuration parameters
-    p_explore::Float32 = 1/150   # probability to enter explore mode each time step
-    min_amp::Float32    = 0.4    # minimum exploration amplitude
-    max_amp::Float32    = 1.4    # maximum exploration amplitude
-    min_width::Int      = 5      # minimum explore duration (in steps)
-    max_width::Int      = 30     # maximum explore duration (in steps)
+    p_explore::Float32 = 1/5   # probability to enter explore mode each time step
+    min_amp::Float32    = 0.8    # minimum exploration amplitude
+    max_amp::Float32    = 1.6    # maximum exploration amplitude
+    min_width::Int      = 1      # minimum explore duration (in steps)
+    max_width::Int      = 8     # maximum explore duration (in steps)
 
     # Internal state
     state::Symbol       = :idle  # current mode (:idle or :explore)
@@ -432,9 +432,9 @@ function (p::PPOPolicy2)(env::AbstractEnv)
         dist.σ .*= modulation_value
         #dist.σ .+= modulation_value * 0.25
 
-        if p.clip1
-            clamp!(dist.μ, -1.0, 1.0)
-        end
+        # if p.clip1
+        #     clamp!(dist.μ, -1.0, 1.0)
+        # end
 
         if isnothing(p.noise)
             action = rand.(p.rng, dist)

@@ -2,10 +2,10 @@
 Base.@kwdef mutable struct PPOPolicy3 <: AbstractPolicy
     approximator
     trajectory_no_exploration
-    exploration_mode::Bool = false
+    exploration_mode::Bool = true
     γ::Float32 = 0.99f0
     λ::Float32 = 0.95f0
-    polyak_factor::Float32 = 0.995f0
+    polyak_factor::Float32 = 0.993f0
     clip_range::Float32 = 0.2f0
     n_microbatches::Int = 4
     n_epochs::Int = 4
@@ -17,7 +17,7 @@ Base.@kwdef mutable struct PPOPolicy3 <: AbstractPolicy
     adaptive_weights::Bool = true
     rng = Random.GLOBAL_RNG
     update_freq::Int = 256
-    update_freq_no_exploration::Int = 256
+    update_freq_no_exploration::Int = 0
     update_step::Int = 0
     update_step_no_exploration::Int = 0
     n_updates::Int = 0
@@ -65,7 +65,7 @@ end
 
 
 
-function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, critic_regularization_loss_weight=0.01f0, logσ_regularization_loss_weight=0.01f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 1.0, fear_scale = 0.5, new_loss = true, update_freq_no_exploration = 256)
+function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, critic_regularization_loss_weight=0.01f0, logσ_regularization_loss_weight=0.01f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 1.0, fear_scale = 0.5, new_loss = true, update_freq_no_exploration = 0)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -84,9 +84,15 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
 
     mm = ModulationModule()
 
-    critic = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic)
+    critic = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic, is_critic2 = true)
     critic2 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic, is_critic2 = true)
     critic3 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic)
+
+    if update_freq_no_exploration > 0
+        exploration_mode = false
+    else
+        exploration_mode = true
+    end
 
     Agent(
         policy = PPOPolicy3(
@@ -99,15 +105,15 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
                 ),
                 critic = critic,
                 critic2 = critic2,
-                critic3 = critic3,
+                critic3 = deepcopy(critic),
                 critic_target = deepcopy(critic),
                 critic2_target = deepcopy(critic2),
                 critic3_target = deepcopy(critic3),
-                optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate/12, betas)),
-                optimizer_sigma = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate, betas)),
-                optimizer_critic = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate, betas)),
-                optimizer_critic2 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate/4, betas)),
-                optimizer_critic3 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate, betas)),
+                optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AMSGrad(learning_rate/5, betas)),
+                optimizer_sigma = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AMSGrad(learning_rate/5, betas)),
+                optimizer_critic = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AMSGrad(learning_rate*5, betas)),
+                optimizer_critic2 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AMSGrad(learning_rate, betas)),
+                optimizer_critic3 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AMSGrad(learning_rate, betas)),
             ) : approximator,
             trajectory_no_exploration = CircularArrayTrajectory(;
                 capacity = update_freq_no_exploration,
@@ -142,6 +148,7 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
             fear_scale = fear_scale,
             new_loss = new_loss,
             mm = mm,
+            exploration_mode = exploration_mode,
         ),
         trajectory = 
         CircularArrayTrajectory(;
@@ -183,9 +190,9 @@ function (p::PPOPolicy3)(env::AbstractEnv; ignore_explore_mode = false)
         dist.σ .*= modulation_value
         #dist.σ .+= modulation_value * 0.25
 
-        if p.clip1
-            clamp!(dist.μ, -1.0, 1.0)
-        end
+        # if p.clip1
+        #     clamp!(dist.μ, -1.0, 1.0)
+        # end
 
         if p.exploration_mode || ignore_explore_mode
             if isnothing(p.noise)
@@ -194,7 +201,7 @@ function (p::PPOPolicy3)(env::AbstractEnv; ignore_explore_mode = false)
                 norm_factor = float(pi / 20) #* 5
                 p.noise_step += 1
                 noise = [CoherentNoise.sample(p.noise_sampler, p.noise_step/p.noise_scale, float(π+2*i))/norm_factor for i in 1:size(dist.μ, 2)]
-                action = dist.μ + dist.σ .* noise'
+                action = Float32.(dist.μ + dist.σ .* noise')
             end
 
             if p.clip1
@@ -287,8 +294,10 @@ function update!(
         if p.update_step % p.update_freq == 0
             p.n_updates += 1
             _update!(p, t)
-            p.exploration_mode = false
-            p.update_step_no_exploration = 0
+            if p.update_freq_no_exploration > 0
+                p.exploration_mode = false
+                p.update_step_no_exploration = 0
+            end
         end
     else
         p.update_step_no_exploration += 1
@@ -323,6 +332,13 @@ end
 
 
 
+bad_gradients(grads) = any(grads) do g
+    any(values(grads)) do g               # Zygote.Grads ist ein IdDict
+        g === nothing && return false     # Parameter wird gerade nicht verändert
+        !all(isfinite, g)                 # mindestens ein Element ist NaN/Inf
+    end
+end
+
 function _update_no_exploration!(p::PPOPolicy3)
 
     println("TRAIN_NO_EXPLORATION!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
@@ -348,7 +364,7 @@ function _update_no_exploration!(p::PPOPolicy3)
     # calculate returns
     rewards = to_device(t[:reward])
     terminal = to_device(t[:terminal])
-    next_values = reshape(send_to_host(AC.critic_target(flatten_batch(next_states))), n_envs, :)
+    next_values = reshape(send_to_host(AC.critic_target(  vcat(flatten_batch(next_states), zeros(Float32, 1, n_envs * n_rollout)) )), n_envs, :)
     returns = calculate_returns(rewards, terminal, next_values, γ)
 
 
@@ -379,7 +395,7 @@ function _update_no_exploration!(p::PPOPolicy3)
             targets = rew + γ .* nv .* (1 .- ter)
 
             g_critic = Flux.gradient(AC.critic) do critic
-                v′ = critic(s) |> vec
+                v′ = critic( vcat(s, zeros(Float32, 1, microbatch_size)) ) |> vec
 
                 critic_loss = mean((targets .- v′) .^ 2)
 
@@ -453,7 +469,7 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
     # calculate returns
     rewards = to_device(t[:reward])
     terminal = to_device(t[:terminal])
-    next_values = reshape(send_to_host(AC.critic3_target(flatten_batch(next_states))), n_envs, :)
+    next_values = reshape(send_to_host(AC.critic_target( vcat(flatten_batch(next_states), ones(Float32, 1, n_envs * n_rollout)) )), n_envs, :)
     returns = calculate_returns(rewards, terminal, next_values, γ)
     
     advantages = reshape(send_to_host( AC.critic2( vcat(flatten_batch(states), flatten_batch(actions)) )) , n_envs, :) - offsets
@@ -463,7 +479,7 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
     action_log_probs = select_last_dim(to_device(t[:action_log_prob]), 1:n)
     explore_mod = to_device(t[:explore_mod])
 
-    stop_update = false
+    stop_actor_update = false
 
     actor_losses = Float32[]
     critic2_losses = Float32[]
@@ -512,7 +528,7 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
 
             targets = rew + γ .* nv .* (1 .- ter)
 
-            clamp!(log_p, log(1e-8), Inf) # clamp old_prob to 1e-8 to avoid inf
+            #clamp!(log_p, log(1e-8), Inf) # clamp old_prob to 1e-8 to avoid inf
 
             if p.normalize_advantage
                 adv = (adv .- mean(adv)) ./ clamp(std(adv), 1e-8, 1000.0)
@@ -520,9 +536,9 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
 
             # s_neg = sample_negatives_far(s)
 
-            g_actor, g_critic3 = Flux.gradient(AC.actor, AC.critic3) do actor, critic3
+            g_actor, g_critic = Flux.gradient(AC.actor, AC.critic) do actor, critic
 
-                v′ = critic3(s) |> vec
+                v′ = critic( vcat(s, ones(Float32, 1, microbatch_size)) ) |> vec
 
                 μ, logσ = actor(s)
 
@@ -536,16 +552,34 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
 
                 #clamp!(log_p′ₐ, log(1e-8), Inf)
 
-                entropy_loss = mean(size(logσ, 1) * (log(2.0f0π) + 1) .+ sum(logσ; dims=1)) / 2
-                
-                ratio = exp.(log_p′ₐ .- log_p)
+                # d = Anzahl der Aktionsdimensionen
+                d = size(logσ, 1)
+                # Konstante c = ½∙(ln(2π)+1)
+                c = 0.5f0 * (log(2π) + 1f0)
+                # Entropie pro Sample: sum(logσ, dims=1) + d*c
+                ent_per_sample = sum(logσ; dims=1) .+ d * c
+                # Mittlerer Entropie‑Loss (negiert, falls Sie maximieren wollen)
+                entropy_loss = mean(ent_per_sample)
+
+                #entropy_loss = mean(size(logσ, 1) * (log(2.0f0π) + 1) .+ sum(logσ; dims=1)) / 2
+
+                eps = Float32(1e-8)
+                ratio = (exp.(log_p′ₐ) .+ eps) ./ (exp.(log_p) .+ eps) # avoid division by zero
+
+                KL_idx = findall(>(0.01), exp_m[:])
 
                 ignore() do
-                    approx_kl_div = mean((ratio .- 1) - log.(ratio)) |> send_to_host
+                    # println(size(ratio))
+                    # println(ratio)
+                    # error("abgebrochen")
+                    
+                    if !stop_actor_update
+                        approx_kl_div = mean(((ratio[KL_idx] .- 1) - log.(ratio[KL_idx]))  .* exp_m[KL_idx]) |> send_to_host
 
-                    if approx_kl_div > p.target_kl
-                        println("Target KL overstepped: $(approx_kl_div) at epoch $(epoch), batch $(i)")
-                        stop_update = true
+                        if approx_kl_div > p.target_kl
+                            println("Target KL overstepped: $(approx_kl_div) at epoch $(epoch), batch $(i)")
+                            stop_actor_update = true
+                        end
                     end
                 end
 
@@ -557,7 +591,7 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
                     surr1 = ratio .* adv
                     surr2 = clamp.(ratio, 1.0f0 - clip_range, 1.0f0 + clip_range) .* adv
 
-                    actor_loss = -mean(min.(surr1, surr2))
+                    actor_loss = -mean(min.(surr1, surr2)[KL_idx] .* exp_m[KL_idx])
                 end
 
                 if IL
@@ -582,31 +616,41 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
                 loss
             end
             
-            if !stop_update
-                Flux.update!(AC.actor_state_tree, AC.actor.μ, g_actor.μ)
-                # Flux.update!(AC.sigma_state_tree, AC.actor.logσ, g_actor.logσ)
-                Flux.update!(AC.critic3_state_tree, AC.critic3, g_critic3)
-
-
-                # update PopArt parameters
-                update!(AC.critic3.layers[end], targets)
-
-                # polyak averaging
-                pf = p.polyak_factor
-                for (dest, src) in zip(Flux.params([AC.critic3_target]), Flux.params([AC.critic3]))
-                    dest .= pf .* dest .+ (1 - pf) .* src
-                end
-
-                AC.critic3_target.layers[end].μ = AC.critic3_target.layers[end].μ * pf + (1 - pf) * AC.critic3.layers[end].μ
-                AC.critic3_target.layers[end].σ = AC.critic3_target.layers[end].σ * pf + (1 - pf) * AC.critic3.layers[end].σ
+            if false #bad_gradients(g_actor)
+                println("Bad gradients detected")
             else
-                break
+                if !stop_actor_update
+                    Flux.update!(AC.actor_state_tree, AC.actor.μ, g_actor.μ)
+                    Flux.update!(AC.sigma_state_tree, AC.actor.logσ, g_actor.logσ)
+                end
             end
 
-            v′ = AC.critic(s) |> vec
-            nv′ = AC.critic3(ns) |> vec
 
-            targets = rew + γ .* nv′ .* (1 .- ter) - v′
+            Flux.update!(AC.critic_state_tree, AC.critic, g_critic)
+
+            # update PopArt parameters
+            update!(AC.critic.layers[end], targets)
+
+            # polyak averaging
+            pf = p.polyak_factor
+            for (dest, src) in zip(Flux.params([AC.critic_target]), Flux.params([AC.critic]))
+                dest .= pf .* dest .+ (1 - pf) .* src
+            end
+
+            AC.critic_target.layers[end].μ = AC.critic_target.layers[end].μ * pf + (1 - pf) * AC.critic.layers[end].μ
+            AC.critic_target.layers[end].σ = AC.critic_target.layers[end].σ * pf + (1 - pf) * AC.critic.layers[end].σ
+
+
+
+            v′ = AC.critic(vcat(s, zeros(Float32, 1, microbatch_size))) |> vec
+            nv′ = AC.critic(vcat(ns, ones(Float32, 1, microbatch_size))) |> vec
+            nv2′ = AC.critic(vcat(ns, zeros(Float32, 1, microbatch_size))) |> vec
+            #v3′ = AC.critic3(s) |> vec
+            mus = AC.actor.μ(s) |> vec
+
+            diffs = clamp.( (abs.(a[:] - mus) .* 1.0).^2, 0, 1)
+
+            targets = diffs .* (rew + γ .* nv′ .* (1 .- ter)) + (1 .- diffs) .* (rew + γ .* nv2′ .* (1 .- ter)) - v′
 
             g_critic2 = Flux.gradient(AC.critic2) do critic2
                 critic2_values = critic2(vcat(s,a)) |> vec
@@ -630,9 +674,6 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
 
         end
 
-        if stop_update
-            break
-        end
     end
 
 
@@ -640,11 +681,13 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
 
     mean_actor_loss = mean(abs.(actor_losses))
     mean_critic2_loss = mean(abs.(critic2_losses))
+    mean_critic3_loss = mean(abs.(critic3_losses))
     mean_entropy_loss = mean(abs.(entropy_losses))
     
     println("---")
     println("mean actor loss: $(mean_actor_loss)")
     println("mean critic2 loss: $(mean_critic2_loss)")
+    println("mean critic3 loss: $(mean_critic3_loss)")
     println("mean entropy loss: $(mean_entropy_loss)")
 
     mean_excitement = mean(abs.(excitements))
