@@ -53,8 +53,11 @@ end
 
 function perturb_sparse(model, σ, p_mask)
     for p in Flux.params(model)
-        mask = rand(size(p)...) .< p_mask
-        p .+= mask .* (σ * randn(Float32, size(p)))
+        # skip biases
+        if length(size(p)) > 1
+            mask = rand(size(p)...) .< p_mask
+            p .+= mask .* (σ * randn(Float32, size(p)))
+        end
     end
 
     model
@@ -91,7 +94,7 @@ function create_agent_ppo4(;action_space, state_space, use_gpu, rng, y, p, updat
                 critic_no_explore = critic_no_explore,
                 critic = deepcopy(critic_no_explore),
                 critic_no_explore_frozen = deepcopy(critic_no_explore),
-                optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate*14, betas)),
+                optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
                 optimizer_critic_no_explore = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
                 optimizer_critic = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
             ) : approximator,
