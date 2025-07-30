@@ -389,24 +389,28 @@ function nstep_targets(
     for t in 1:T
         g = 0f0
         discount = 1f0
-        # k‑Schritte von Belohnungen
+        hit_done = false
+
+        # k-Schritte von Belohnungen sammeln
         for k in 0:(n-1)
             idx = t + k
             if idx > T
                 break
             end
             g += discount * rewards[idx]
-            if dones[idx]
+            if dones[idx]        # Episode endet hier
+                hit_done = true
                 break
             end
             discount *= γ
         end
-        # bootstrap mit next_values:
+
+        # Nur bootstrappen, wenn in den ersten n Schritten kein Done war
         idxn = t + n - 1
-        if idxn ≤ T && !dones[idxn]
-            # next_values[idxn] = V(s_{idxn+1})
+        if !hit_done && idxn ≤ T && !dones[idxn]
             g += discount * next_values[idxn]
         end
+
         targets[t] = g
     end
     return targets
