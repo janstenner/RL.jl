@@ -664,7 +664,7 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
 
 
 
-    if p.update_step % (p.update_freq * 50) == 0 || isnothing(AC.actor_state_tree) || isnothing(AC.sigma_state_tree) || isnothing(AC.critic_state_tree) || isnothing(AC.critic2_state_tree)
+    if isnothing(AC.actor_state_tree) || isnothing(AC.sigma_state_tree) || isnothing(AC.critic_state_tree) || isnothing(AC.critic2_state_tree)
         println("________________________________________________________________________")
         println("Reset Optimizers")
         println("________________________________________________________________________")
@@ -689,7 +689,7 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
     targets = lambda_truncated_targets(rewards, terminal, next_values, γ)[:]
 
     next_q_values = reshape( AC.critic2( vcat(next_states, AC.actor.μ( next_states) ) ), n_envs, :)
-    targets_q = lambda_truncated_targets(rewards, terminal, next_q_values, γ)[:]
+    targets_q = td_lambda_targets(rewards, terminal, next_q_values, γ; λ=0.7f0)[:]
 
     for epoch in 1:n_epochs
 
@@ -818,8 +818,10 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
             end
             
             if !stop_update
-                Flux.update!(AC.actor_state_tree, AC.actor.μ, g_actor.μ)
-                Flux.update!(AC.sigma_state_tree, AC.actor.logσ, g_actor.logσ)
+                if (p.update_step / p.update_freq) % 4 == 0
+                    Flux.update!(AC.actor_state_tree, AC.actor.μ, g_actor.μ)
+                    Flux.update!(AC.sigma_state_tree, AC.actor.logσ, g_actor.logσ)
+                end
                 Flux.update!(AC.critic_state_tree, AC.critic, g_critic)
             else
                 break
@@ -845,7 +847,7 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
                 else
                     bellman = mean(((tar .- critic2_values) .^ 2))
                     fr_term = mean((critic2_values .- q_ref[inds]) .^ 2)
-                    critic2_loss = bellman + 0.5 * fr_term # .* exp_m[:])
+                    critic2_loss = bellman + 0.8 * fr_term # .* exp_m[:])
                 end
 
                 ignore() do
@@ -865,7 +867,7 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
 
     #println(p.update_step / p.update_freq)
 
-    if (p.update_step / p.update_freq) % 5 == 0
+    if (p.update_step / p.update_freq) % 4 == 0
         println("CRITIC FROZEN UPDATE")
         AC.critic_frozen = deepcopy(AC.critic)
         AC.critic2_frozen = deepcopy(AC.critic2)

@@ -64,6 +64,7 @@ include("./agent_ppo.jl")
 include("./agent_ppo2.jl")
 include("./agent_ppo3.jl")
 include("./agent_ppo4.jl")
+include("./agent_sac.jl")
 include("./agent_mat.jl")
 include("./agent_matmix.jl")
 

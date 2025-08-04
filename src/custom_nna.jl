@@ -128,12 +128,15 @@ function (model::GaussianNetwork)(rng::AbstractRNG, s; is_sampling::Bool=false, 
     
     if is_sampling
         σ = exp.(logσ)
-        z = Zygote.ignore() do
+        noise = Zygote.ignore() do
             noise = randn(rng, Float32, size(μ))
-            model.normalizer.(μ .+ σ .* noise)
+            noise
         end
+        u = μ .+ σ .* noise
+        z = model.normalizer.(u)
+
         if is_return_log_prob
-            logp_π = sum(normlogpdf(μ, σ, z) .- (2.0f0 .* (log(2.0f0) .- z .- softplus.(-2.0f0 .* z))), dims=1)
+            logp_π = sum(normlogpdf(μ, σ, u) .- (2.0f0 .* (log(2.0f0) .- u .- softplus.(-2.0f0 .* u))), dims=1)
             return z, logp_π
         else
             return z
