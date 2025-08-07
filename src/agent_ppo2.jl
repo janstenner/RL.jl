@@ -123,7 +123,7 @@ end
 
 @forward ActorCritic2.critic device
 
-function create_critic_PPO2(;ns, na, use_gpu, init, nna_scale, drop_middle_layer, fun = relu, is_critic2 = false)
+function create_critic_PPO2(;ns, na, use_gpu, init, nna_scale, drop_middle_layer, fun = relu, is_critic2 = false, popart = false)
     nna_size_critic = Int(floor(20 * nna_scale))
 
     if is_critic2
@@ -132,18 +132,22 @@ function create_critic_PPO2(;ns, na, use_gpu, init, nna_scale, drop_middle_layer
         input_size = ns
     end
     
+    if popart
+        last = PopArt(nna_size_critic; init = init)
+    else
+        last = Dense(nna_size_critic, 1; init = init)
+    end
+
     if drop_middle_layer
         n = Chain(
             Dense(input_size, nna_size_critic, fun; init = init),
-            Dense(nna_size_critic, 1; init = init),
-            #PopArt(nna_size_critic; init = init)
+            last,
         )
     else
         n = Chain(
             Dense(input_size, nna_size_critic, fun; init = init),
             Dense(nna_size_critic, nna_size_critic, fun; init = init),
-            Dense(nna_size_critic, 1; init = init),
-            #PopArt(nna_size_critic; init = init)
+            last,
         )
     end
 

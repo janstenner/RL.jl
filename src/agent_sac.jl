@@ -37,9 +37,18 @@ Base.@kwdef mutable struct SACPolicy <: AbstractPolicy
     update_step::Int =0
     rng =Random.GLOBAL_RNG
     device_rng =Random.GLOBAL_RNG
+
     # Logging
-    reward_term::Float32 =0.0f0
-    entropy_term::Float32 =0.0f0
+    last_reward_term::Float32 =0.0f0
+    last_entropy_term::Float32 =0.0f0
+    last_actor_loss::Float32 =0.0f0
+    last_critic1_loss::Float32 =0.0f0
+    last_critic2_loss::Float32 =0.0f0
+    #last_log_alpha::Float32 =0.0f0
+    last_q1_mean::Float32 =0.0f0
+    last_q2_mean::Float32 =0.0f0
+    last_target_q_mean::Float32 =0.0f0
+    last_mean_minus_log_pi::Float32 =0.0f0
 end
 
 
@@ -59,10 +68,10 @@ function create_agent_sac(;action_space, state_space, use_gpu = false, rng, y, t
     isnothing(lr_alpha)                 && (lr_alpha = Float32(learning_rate))
 
 
-    qnetwork1 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic, is_critic2 = true)
+    qnetwork1 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic, is_critic2 = true, popart = true)
     target_qnetwork1 = deepcopy(qnetwork1)
 
-    qnetwork2 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic, is_critic2 = true)
+    qnetwork2 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic, is_critic2 = true, popart = true)
     target_qnetwork2 = deepcopy(qnetwork2)
 
     Agent(
@@ -224,6 +233,9 @@ function update!(p::SACPolicy, batch::NamedTuple{SARTS})
 
     y = r .+ γ .* (1 .- t) .* dropdims(q′ .- α .* log_π′, dims=1)
 
+    p.last_target_q_mean = mean(y)
+    p.last_mean_minus_log_pi = mean(-log_π′)
+
 
     if isnothing(p.actor_state_tree) || isnothing(p.qnetwork1_state_tree) || isnothing(p.qnetwork2_state_tree)
         println("________________________________________________________________________")
@@ -244,15 +256,29 @@ function update!(p::SACPolicy, batch::NamedTuple{SARTS})
 
     q_grad_1 = Flux.gradient(p.qnetwork1) do qnetwork1
         q1 = dropdims(qnetwork1(q_input), dims=1)
+
+        ignore_derivatives() do
+            p.last_q1_mean = mean(q1)
+            p.last_critic1_loss = Flux.mse(q1, y)
+        end
+
         Flux.mse(q1, y)
     end
     Flux.update!(p.qnetwork1_state_tree, p.qnetwork1, q_grad_1[1])
+    update!(p.qnetwork1.layers[end], y) 
 
     q_grad_2 = Flux.gradient(p.qnetwork2) do qnetwork2
         q2 = dropdims(qnetwork2(q_input), dims=1)
+
+        ignore_derivatives() do
+            p.last_q2_mean = mean(q2)
+            p.last_critic2_loss = Flux.mse(q2, y)
+        end
+
         Flux.mse(q2, y)
     end
     Flux.update!(p.qnetwork2_state_tree, p.qnetwork2, q_grad_2[1])
+    update!(p.qnetwork2.layers[end], y) 
 
     # Train Policy
     p_grad = Flux.gradient(p.actor) do actor
@@ -262,15 +288,15 @@ function update!(p::SACPolicy, batch::NamedTuple{SARTS})
         reward = mean(q)
         entropy = mean(log_π)
         ignore_derivatives() do
-            p.reward_term = reward
-            p.entropy_term = entropy
+            p.last_reward_term = reward
+            p.last_entropy_term = α * entropy
+            p.last_actor_loss = α * entropy - reward
         end
         α * entropy - reward
     end
     Flux.update!(p.actor_state_tree, p.actor, p_grad[1])
 
-    # println("Reward Term = ",  p.reward_term)
-    # println("Entropy Term = ",  p.entropy_term)
+    
 
 
     # Tune entropy automatically
@@ -282,11 +308,20 @@ function update!(p::SACPolicy, batch::NamedTuple{SARTS})
         end
         Flux.update!(p.log_α_state_tree, p.log_α, log_α_grad[1])
 
+        clamp!(p.log_α, -6.5, Inf)
+
         p.α = exp.(p.log_α)[1]
 
-        # println("mean(-logπ′) = ",  mean(-log_π′))
-        # println("target_entropy = ", p.target_entropy)
-        # println("alpha = ",  p.α)
+    end
+
+
+    if p.update_step % (p.update_freq * 100) == 0
+        println("Reward Term = ",  p.last_reward_term)
+        println("Entropy Term = ",  p.last_entropy_term)
+
+        println("mean(-logπ′) = ",  mean(-log_π′))
+        println("target_entropy = ", p.target_entropy)
+        println("alpha = ",  p.α)
     end
 
     # polyak averaging
