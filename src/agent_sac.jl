@@ -87,7 +87,7 @@ function create_agent_sac(;action_space, state_space, use_gpu = false, rng, y, t
             target_qnetwork1 = target_qnetwork1,
             target_qnetwork2 = target_qnetwork2,
 
-            optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AMSGrad(learning_rate, betas)),
+            optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AMSGrad(learning_rate/10, betas)),
             optimizer_qnetwork1 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AMSGrad(learning_rate, betas)),
             optimizer_qnetwork2 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AMSGrad(learning_rate, betas)),
 
@@ -331,4 +331,10 @@ function update!(p::SACPolicy, batch::NamedTuple{SARTS})
     )
         dest .= (1 - τ) .* dest .+ τ .* src
     end
+
+    # PopArt Polyak
+    p.target_qnetwork1[end].μ = (1 - τ) .* p.target_qnetwork1[end].μ .+ τ .* p.qnetwork1[end].μ
+    p.target_qnetwork1[end].σ = (1 - τ) .* p.target_qnetwork1[end].σ .+ τ .* p.qnetwork1[end].σ
+    p.target_qnetwork2[end].μ = (1 - τ) .* p.target_qnetwork2[end].μ .+ τ .* p.qnetwork2[end].μ
+    p.target_qnetwork2[end].σ = (1 - τ) .* p.target_qnetwork2[end].σ .+ τ .* p.qnetwork2[end].σ
 end
