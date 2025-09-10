@@ -12,6 +12,7 @@ using StructArrays
 using UnicodePlots:lineplot
 using Flux
 using Optimisers
+using Functors
 using CUDA
 using Adapt
 using Random

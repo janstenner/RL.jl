@@ -87,9 +87,9 @@ function create_agent_sac(;action_space, state_space, use_gpu = false, rng, y, t
             target_qnetwork1 = target_qnetwork1,
             target_qnetwork2 = target_qnetwork2,
 
-            optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AMSGrad(learning_rate/10, betas)),
-            optimizer_qnetwork1 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AMSGrad(learning_rate, betas)),
-            optimizer_qnetwork2 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AMSGrad(learning_rate, betas)),
+            optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
+            optimizer_qnetwork1 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
+            optimizer_qnetwork2 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
 
             action_space = action_space,
             state_space = state_space,
@@ -297,21 +297,24 @@ function update!(p::SACPolicy, batch::NamedTuple{SARTS})
     Flux.update!(p.qnetwork2_state_tree, p.qnetwork2, q_grad_2[1])
     update!(p.qnetwork2.layers[end], y) 
 
-    # Train Policy
-    p_grad = Flux.gradient(p.actor) do actor
-        a, log_π = actor(p.device_rng, s; is_sampling=true, is_return_log_prob=true)
-        q_input = vcat(s, a)
-        q = min.(p.qnetwork1(q_input), p.qnetwork2(q_input))
-        reward = mean(q)
-        entropy = mean(log_π)
-        ignore_derivatives() do
-            p.last_reward_term = reward
-            p.last_entropy_term = α * entropy
-            p.last_actor_loss = α * entropy - reward
+
+    if p.update_step % (p.update_freq * 10) == 0
+        # Train Policy
+        p_grad = Flux.gradient(p.actor) do actor
+            a, log_π = actor(p.device_rng, s; is_sampling=true, is_return_log_prob=true)
+            q_input = vcat(s, a)
+            q = min.(p.qnetwork1(q_input), p.qnetwork2(q_input))
+            reward = mean(q)
+            entropy = mean(log_π)
+            ignore_derivatives() do
+                p.last_reward_term = reward
+                p.last_entropy_term = α * entropy
+                p.last_actor_loss = α * entropy - reward
+            end
+            α * entropy - reward
         end
-        α * entropy - reward
+        Flux.update!(p.actor_state_tree, p.actor, p_grad[1])
     end
-    Flux.update!(p.actor_state_tree, p.actor, p_grad[1])
 
     
 

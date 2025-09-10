@@ -76,7 +76,7 @@ function create_logσ(;logσ_is_network, ns, na, use_gpu, init, nna_scale, drop_
     return res
 end
 
-function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, noise = nothing, noise_scale = 90)
+function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, noise = nothing, noise_scale = 90, clip_range_vf = 0.2f0)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -126,6 +126,7 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
             noise = noise,
             noise_sampler = noise_sampler,
             noise_scale = noise_scale,
+            clip_range_vf = clip_range_vf,
         ),
         trajectory = 
         CircularArrayTrajectory(;
@@ -175,6 +176,7 @@ mutable struct PPOPolicy{A<:ActorCritic,D,R} <: AbstractPolicy
     γ::Float32
     λ::Float32
     clip_range::Float32
+    clip_range_vf::Union{Nothing,Float32}
     max_grad_norm::Float32
     n_microbatches::Int
     n_epochs::Int
@@ -207,6 +209,7 @@ function PPOPolicy(;
     γ=0.99f0,
     λ=0.95f0,
     clip_range=0.2f0,
+    clip_range_vf = 0.2f0,
     max_grad_norm=0.5f0,
     n_microbatches=4,
     n_epochs=4,
@@ -230,6 +233,7 @@ function PPOPolicy(;
         γ,
         λ,
         clip_range,
+        clip_range_vf,
         max_grad_norm,
         n_microbatches,
         n_epochs,
@@ -427,6 +431,11 @@ end
 
 
 
+function grad_l2_norm_tree(∇tree)
+    arrs = (leaf for leaf in Functors.fleaves(∇tree) if leaf isa AbstractArray)
+    return sqrt(sum(sum(abs2, A) for A in arrs))
+end
+
 
 
 function _update!(p::PPOPolicy, t::Any)
@@ -442,6 +451,7 @@ function _update!(p::PPOPolicy, t::Any)
     w₁ = p.actor_loss_weight
     w₂ = p.critic_loss_weight
     w₃ = p.entropy_loss_weight
+    clip_range_vf = p.clip_range_vf
     D = device(AC)
     to_device(x) = send_to_device(D, x)
 
@@ -467,7 +477,7 @@ function _update!(p::PPOPolicy, t::Any)
         dims=2,
         terminal=t[:terminal]
     )
-    # returns = to_device(advantages .+ select_last_dim(values, 1:n_rollout))
+    returns = to_device(advantages .+ select_last_dim(values, 1:n_rollout))
     advantages = to_device(advantages)
 
     # if p.normalize_advantage
@@ -501,6 +511,7 @@ function _update!(p::PPOPolicy, t::Any)
             r = vec(returns)[inds]
             log_p = vec(action_log_probs)[inds]
             adv = vec(advantages)[inds]
+            old_v = vec(values)[inds]
 
             clamp!(log_p, log(1e-8), Inf) # clamp old_prob to 1e-8 to avoid inf
 
@@ -553,7 +564,17 @@ function _update!(p::PPOPolicy, t::Any)
                 surr2 = clamp.(ratio, 1.0f0 - clip_range, 1.0f0 + clip_range) .* adv
 
                 actor_loss = -mean(min.(surr1, surr2))
-                critic_loss = mean((r .- v′) .^ 2)
+
+                if isnothing(clip_range_vf) || clip_range_vf == 0.0
+                    critic_loss = mean((r .- v′) .^ 2)
+                else
+                    # clipped value function loss, from OpenAI SpinningUp implementation
+                    Δ = v′ .- old_v
+                    values_pred = old_v .+ clamp.(Δ, -clip_range_vf, clip_range_vf)
+                    critic_loss = mean((r .- values_pred) .^ 2)
+                end
+
+
                 loss = w₁ * actor_loss + w₂ * critic_loss - w₃ * entropy_loss
 
 
@@ -568,6 +589,11 @@ function _update!(p::PPOPolicy, t::Any)
             if !stop_update
                 Flux.update!(AC.actor_state_tree, AC.actor, g_actor)
                 Flux.update!(AC.critic_state_tree, AC.critic, g_critic)
+
+                # println("...............")
+                # println(grad_l2_norm_tree(g_actor))
+                # println(grad_l2_norm_tree(g_critic))
+                # println("...............")
             else
                 break
             end
