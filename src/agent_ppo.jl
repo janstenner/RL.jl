@@ -136,7 +136,7 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
                 action_log_prob = Float32 => (n_envs),
                 reward = Float32 => (n_envs),
                 terminal = Bool => (n_envs,),
-                next_values = Float32 => (1, n_envs),
+                next_state = Float32 => (size(state_space)[1], n_envs),
         ),
     )
 end
@@ -413,7 +413,7 @@ function update!(
 
     push!(trajectory[:reward], r)
     push!(trajectory[:terminal], is_terminated(env))
-    push!(trajectory[:next_values], policy.approximator.critic(send_to_device(device(policy.approximator), env.state)) |> send_to_host)
+    push!(trajectory[:next_state], state(env))
 end
 
 function update!(
@@ -461,12 +461,13 @@ function _update!(p::PPOPolicy, t::Any)
 
     n = length(t)
     states = to_device(t[:state])
+    next_states = to_device(t[:next_state])
 
 
     states_flatten_on_host = flatten_batch(select_last_dim(t[:state], 1:n))
 
     values = reshape(send_to_host(AC.critic(flatten_batch(states))), n_envs, :)
-    next_values = reshape(flatten_batch(t[:next_values]), n_envs, :)
+    next_values = reshape(send_to_host(AC.critic(flatten_batch(next_states))), n_envs, :)
 
     advantages, returns = generalized_advantage_estimation(
         t[:reward],

@@ -238,7 +238,7 @@ function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, updat
                 reward = Float32 => (n_envs),
                 explore_mod = Float32 => (n_envs),
                 terminal = Bool => (n_envs,),
-                next_states = Float32 => (size(state_space)[1], n_envs),
+                next_state = Float32 => (size(state_space)[1], n_envs),
         ),
     )
 end
@@ -515,7 +515,7 @@ function update!(
 
     push!(trajectory[:reward], r)
     push!(trajectory[:terminal], is_terminated(env))
-    push!(trajectory[:next_states], state(env))
+    push!(trajectory[:next_state], state(env))
     #push!(trajectory[:next_values], policy.approximator.critic(send_to_device(device(policy.approximator), env.state)) |> send_to_host)
 end
 
@@ -611,11 +611,11 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
 
     n = length(t)
     states = to_device(t[:state])
-    next_states = to_device(t[:next_states])
+    next_states = to_device(t[:next_state])
     actions = to_device(t[:action])
 
     states_flatten_on_host = flatten_batch(select_last_dim(t[:state], 1:n))
-    next_states_flatten_on_host = flatten_batch(select_last_dim(t[:next_states], 1:n))
+    next_states_flatten_on_host = flatten_batch(select_last_dim(t[:next_state], 1:n))
 
     values = reshape(send_to_host(AC.critic(flatten_batch(states))), n_envs, :)
 
@@ -680,7 +680,7 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
 
 
 
-    next_states = to_device(flatten_batch(t[:next_states]))
+    next_states = to_device(flatten_batch(t[:next_state]))
     rewards = to_device(t[:reward])
     terminal = to_device(t[:terminal])
 
