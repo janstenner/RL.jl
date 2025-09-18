@@ -310,6 +310,22 @@ function update!(
     end
 end
 
+function _update!(p::CustomDDPGPolicy, t::AbstractTrajectory)
+    #this is for imitation learning
+
+    if length(size(p.action_space)) == 2
+        number_actuators = size(p.action_space)[2]
+    else
+        #mono case 
+        number_actuators = 1
+    end
+
+    for i = 1:p.update_loops
+        inds, batch = pde_sample(p.rng, t, BatchSampler{SARTS}(p.batch_size), number_actuators)
+        update!(p, batch)
+    end
+end
+
 function update!(policy::CustomDDPGPolicy, batch::NamedTuple{SARTS})
     
     s, a, r, t, snext = batch
