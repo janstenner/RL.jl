@@ -30,10 +30,12 @@ function create_NNA(;na, ns, use_gpu, is_actor, init, copyfrom = nothing, nna_sc
         end
     end
 
-    nna = CustomNeuralNetworkApproximator(
-        model = use_gpu ? n |> gpu : n,
-        optimizer = Flux.Adam(learning_rate),
-    )
+    # nna = CustomNeuralNetworkApproximator(
+    #     model = use_gpu ? n |> gpu : n,
+    #     optimizer = Flux.Adam(learning_rate),
+    # )
+
+    nna = use_gpu ? n |> gpu : n
 
     if copyfrom !== nothing
         copyto!(nna, copyfrom) 
@@ -46,7 +48,7 @@ end
 function create_agent(;action_space, state_space, use_gpu, rng, y, p, batch_size,
                     start_steps, start_policy, update_after, update_freq, update_loops = 1, reset_stage = POST_EPISODE_STAGE, act_limit,
                     act_noise, noise_hold = 1,
-                    nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, memory_size = 0, trajectory_length = 1000, mono = false, learning_rate = 0.001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing)
+                    nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, memory_size = 0, trajectory_length = 1000, mono = false, learning_rate = 0.001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, clip_grad = 0.5, betas = (0.9, 0.999))
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -84,6 +86,9 @@ function create_agent(;action_space, state_space, use_gpu, rng, y, p, batch_size
             behavior_actor = behavior_actor,
             behavior_critic = behavior_critic,
 
+            optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
+            optimizer_critic = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate_critic, betas)),
+
             use_gpu = use_gpu,
 
             y = y,
@@ -113,10 +118,6 @@ function create_agent(;action_space, state_space, use_gpu, rng, y, p, batch_size
 end
 
 Base.@kwdef mutable struct CustomDDPGPolicy{
-    BA<:CustomNeuralNetworkApproximator,
-    BC<:CustomNeuralNetworkApproximator,
-    TA<:CustomNeuralNetworkApproximator,
-    TC<:CustomNeuralNetworkApproximator,
     P,
     R,
 } <: AbstractPolicy
@@ -126,10 +127,15 @@ Base.@kwdef mutable struct CustomDDPGPolicy{
 
     rng::R
 
-    behavior_actor::BA
-    behavior_critic::BC
-    target_actor::TA
-    target_critic::TC
+    behavior_actor
+    behavior_critic
+    target_actor
+    target_critic
+
+    optimizer_actor = ADAM()
+    optimizer_critic = ADAM()
+    actor_state_tree = nothing
+    critic_state_tree = nothing
 
     use_gpu::Bool
 
@@ -170,9 +176,6 @@ end
 
 
 function (policy::CustomDDPGPolicy)(env; learning = true, test = false)
-    if learning
-        policy.update_step += 1
-    end
 
     if policy.update_step <= policy.start_steps
         policy.start_policy(env)
@@ -252,6 +255,8 @@ function update!(
     ::PreActStage,
     action,
 )
+    policy.update_step += 1
+
     s = state(env)
 
     #We assume that action_space[2] == state_space[2]
@@ -327,6 +332,14 @@ function update!(policy::CustomDDPGPolicy, batch::NamedTuple{SARTS})
     
     s, a, r, t, snext = batch
 
+    if isnothing(policy.actor_state_tree) || isnothing(policy.critic_state_tree)
+        println("________________________________________________________________________")
+        println("Reset Optimizers")
+        println("________________________________________________________________________")
+        policy.actor_state_tree = Flux.setup(policy.optimizer_actor, policy.behavior_actor)
+        policy.critic_state_tree = Flux.setup(policy.optimizer_critic, policy.behavior_critic)
+    end
+
     A = policy.behavior_actor
     C = policy.behavior_critic
     Aₜ = policy.target_actor
@@ -351,28 +364,26 @@ function update!(policy::CustomDDPGPolicy, batch::NamedTuple{SARTS})
     qnext = r .+ y .* (1 .- t) .* qₜ
     a = Flux.unsqueeze(a, ndims(a)+1)
 
-    gs1 = gradient(Flux.params(C)) do
-        q = C(vcat(s, a)) |> vec
+    critic_grad = Flux.gradient(C) do critic
+        q = critic(vcat(s, a)) |> vec
         loss = mean((qnext .- q) .^ 2)
         ignore() do
             policy.critic_loss = loss
         end
         loss
     end
+    Flux.update!(policy.critic_state_tree, C, critic_grad[1])
 
-    update!(C, gs1)
-
-    gs2 = gradient(Flux.params(A)) do
-        loss = -mean(C(vcat(s, A(s))))
+    actor_grad = Flux.gradient(A) do actor
+        loss = -mean(C(vcat(s, actor(s))))
         #loss = abs.( (s .* 500 - 30 .* A(s)) / 500 )[1]
         ignore() do
             policy.actor_loss = loss
         end
         loss
     end
+    Flux.update!(policy.actor_state_tree, A, actor_grad[1])
 
-    #Flux.Optimise.update!(Descent(), Flux.params(A), gs2)
-    update!(A, gs2)
 
     # polyak averaging
     for (dest, src) in zip(Flux.params([Aₜ, Cₜ]), Flux.params([A, C]))

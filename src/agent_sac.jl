@@ -128,7 +128,6 @@ end
 
 # TODO: handle Training/Testing mode
 function (p::SACPolicy)(env)
-    p.update_step += 1
 
     if p.update_step <= p.start_steps
         action = p.start_policy(env)
@@ -169,6 +168,8 @@ function update!(
     ::PreActStage,
     action,
 )
+    policy.update_step += 1
+    
     push!(
         trajectory;
         state = state(env),
