@@ -196,10 +196,10 @@ function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, updat
                 critic_frozen = critic_frozen,
                 critic2 = critic2,
                 critic2_frozen = critic2_frozen,
-                optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AMSGrad(learning_rate/10, betas)),
-                optimizer_sigma = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AMSGrad(learning_rate/10, betas)),
-                optimizer_critic = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AMSGrad(learning_rate, betas)),
-                optimizer_critic2 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AMSGrad(learning_rate, betas)),
+                optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
+                optimizer_sigma = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
+                optimizer_critic = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
+                optimizer_critic2 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
             ) : approximator,
             γ = y,
             λ = p,
@@ -629,7 +629,7 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
 
     next_values = reshape(send_to_host( AC.critic2( vcat(flatten_batch(states), flatten_batch(actions)) )) , n_envs, :)
 
-    deltas = next_values - offsets
+    deltas = next_values #- offsets
 
     advantages, returns = generalized_advantage_estimation(
         deltas,
@@ -822,7 +822,7 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
             end
             
             if !stop_update
-                if (p.update_step / p.update_freq) % 4 == 0
+                if (p.update_step / p.update_freq) % 1 == 0
                     Flux.update!(AC.actor_state_tree, AC.actor.μ, g_actor.μ)
                     Flux.update!(AC.sigma_state_tree, AC.actor.logσ, g_actor.logσ)
                 end
