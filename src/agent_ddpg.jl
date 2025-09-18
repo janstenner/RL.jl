@@ -59,12 +59,9 @@ function create_agent(;action_space, state_space, use_gpu, rng, y, p, batch_size
 
     behavior_critic = create_NNA(na = size(action_space)[1], ns = size(state_space)[1], use_gpu = use_gpu, is_actor = false, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, learning_rate = learning_rate_critic, fun = fun_critic)
 
-    target_actor = create_NNA(na = size(action_space)[1], ns = size(state_space)[1], use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, learning_rate = learning_rate, fun = fun)
 
-    target_critic = create_NNA(na = size(action_space)[1], ns = size(state_space)[1], use_gpu = use_gpu, is_actor = false, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, learning_rate = learning_rate_critic, fun = fun_critic)
-
-    copyto!(behavior_actor, target_actor)  # force sync
-    copyto!(behavior_critic, target_critic)  # force sync
+    target_actor = deepcopy(behavior_actor)
+    target_critic = deepcopy(behavior_critic)
 
     if mono
         reward_size = 1
