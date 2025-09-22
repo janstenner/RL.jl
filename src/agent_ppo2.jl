@@ -822,7 +822,7 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
             end
             
             if !stop_update
-                if (p.update_step / p.update_freq) % 1 == 0
+                if (p.update_step / p.update_freq) % 4 == 0
                     Flux.update!(AC.actor_state_tree, AC.actor.μ, g_actor.μ)
                     Flux.update!(AC.sigma_state_tree, AC.actor.logσ, g_actor.logσ)
                 end
