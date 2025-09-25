@@ -1,10 +1,10 @@
 Base.@kwdef mutable struct ModulationModule
     # Configuration parameters
-    p_explore::Float32 = 1/5   # probability to enter explore mode each time step
-    min_amp::Float32    = 0.8    # minimum exploration amplitude
+    p_explore::Float32 = 0.07   # probability to enter explore mode each time step
+    min_amp::Float32    = 0.2    # minimum exploration amplitude
     max_amp::Float32    = 1.6    # maximum exploration amplitude
     min_width::Int      = 1      # minimum explore duration (in steps)
-    max_width::Int      = 8     # maximum explore duration (in steps)
+    max_width::Int      = 13     # maximum explore duration (in steps)
 
     # Internal state
     state::Symbol       = :idle  # current mode (:idle or :explore)
@@ -158,11 +158,12 @@ function create_critic_PPO2(;ns, na, use_gpu, init, nna_scale, drop_middle_layer
 end
 
 
-function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, critic_regularization_loss_weight=0.01f0, logσ_regularization_loss_weight=0.01f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 1.0, fear_scale = 0.5, new_loss = true)
+function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, critic_regularization_loss_weight=0.01f0, logσ_regularization_loss_weight=0.01f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 1.0, fear_scale = 0.5, new_loss = true)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
     isnothing(fun_critic)               &&  (fun_critic = fun)
+    isnothing(learning_rate_critic)     &&  (learning_rate_critic = learning_rate)
 
     init = Flux.glorot_uniform(rng)
 
@@ -198,12 +199,13 @@ function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, updat
                 critic2_frozen = critic2_frozen,
                 optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
                 optimizer_sigma = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
-                optimizer_critic = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
-                optimizer_critic2 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
+                optimizer_critic = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate_critic, betas)),
+                optimizer_critic2 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate_critic, betas)),
             ) : approximator,
             γ = y,
             λ = p,
             clip_range = clip_range,
+            clip_range_vf = clip_range_vf,
             max_grad_norm = 0.5f0,
             n_epochs = n_epochs,
             n_microbatches = n_microbatches,
@@ -278,6 +280,7 @@ mutable struct PPOPolicy2{A<:ActorCritic2,D,R} <: AbstractPolicy
     γ::Float32
     λ::Float32
     clip_range::Float32
+    clip_range_vf::Union{Nothing,Float32}
     max_grad_norm::Float32
     n_microbatches::Int
     n_epochs::Int
@@ -318,6 +321,7 @@ function PPOPolicy2(;
     γ=0.99f0,
     λ=0.95f0,
     clip_range=0.2f0,
+    clip_range_vf = 0.2f0,
     max_grad_norm=0.5f0,
     n_microbatches=4,
     n_epochs=4,
@@ -349,6 +353,7 @@ function PPOPolicy2(;
         γ,
         λ,
         clip_range,
+        clip_range_vf,
         max_grad_norm,
         n_microbatches,
         n_epochs,
@@ -597,6 +602,7 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
     n_epochs = p.n_epochs
     n_microbatches = p.n_microbatches
     clip_range = p.clip_range
+    clip_range_vf = p.clip_range_vf
     w₁ = p.actor_loss_weight
     w₂ = p.critic_loss_weight
     w₃ = p.entropy_loss_weight
@@ -627,9 +633,9 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
     # advantages = reshape(send_to_host( AC.critic2( vcat(flatten_batch(states), flatten_batch(actions)) )) , n_envs, :) - offsets
 
 
-    next_values = reshape(send_to_host( AC.critic2( vcat(flatten_batch(states), flatten_batch(actions)) )) , n_envs, :)
+    q_values = reshape(send_to_host( AC.critic2( vcat(flatten_batch(states), flatten_batch(actions)) )) , n_envs, :)
 
-    deltas = next_values #- offsets
+    deltas = q_values - offsets
 
     advantages, returns = generalized_advantage_estimation(
         deltas,
@@ -643,6 +649,12 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
 
     # returns = to_device(advantages .+ select_last_dim(values, 1:n_rollout))
     advantages = to_device(advantages)
+
+    if p.normalize_advantage
+        advantages = (advantages .- mean(advantages)) ./ clamp(std(advantages), 1e-8, 1000.0)
+    end
+
+    positive_advantage_indices = findall(>(0), vec(advantages))
 
     # if p.normalize_advantage
     #     advantages = (advantages .- mean(advantages)) ./ clamp(std(advantages), 1e-8, 1000.0)
@@ -702,6 +714,8 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
 
             inds = rand_inds[(i-1)*microbatch_size+1:i*microbatch_size]
 
+            #inds = positive_advantage_indices
+
             # s = to_device(select_last_dim(states_flatten_on_host, inds))
             # !!! we need to convert it into a continuous CuArray otherwise CUDA.jl will complain scalar indexing
             s = to_device(collect(select_last_dim(states_flatten_on_host, inds)))
@@ -719,13 +733,15 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
 
             tar = vec(targets)[inds]
 
+            old_v = vec(values)[inds]
+
             
 
             clamp!(log_p, log(1e-8), Inf) # clamp old_prob to 1e-8 to avoid inf
 
-            if p.normalize_advantage
-                adv = (adv .- mean(adv)) ./ clamp(std(adv), 1e-8, 1000.0)
-            end
+            # if p.normalize_advantage
+            #     adv = (adv .- mean(adv)) ./ clamp(std(adv), 1e-8, 1000.0)
+            # end
 
             # s_neg = sample_negatives_far(s)
 
@@ -777,7 +793,7 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
                 # end
 
                 if p.new_loss
-                    actor_loss = -mean(((ratio .* adv) - fear)) # .* exp_m[:])
+                    actor_loss = -mean(((ratio .* adv) - fear)  .* exp_m[:])
                 else
                     surr1 = ratio .* adv
                     surr2 = clamp.(ratio, 1.0f0 - clip_range, 1.0f0 + clip_range) .* adv
@@ -786,13 +802,23 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
                 end
 
 
+                if isnothing(clip_range_vf) || clip_range_vf == 0.0
+                    values_pred = v′
+                else
+                    # clipped value function loss, from OpenAI SpinningUp implementation
+                    Δ = v′ .- old_v
+                    values_pred = old_v .+ clamp.(Δ, -clip_range_vf, clip_range_vf)
+                end
+
+
+
                 if IL
                     critic_loss = 0.0
                     # critic2_loss = 0.0
                 else
-                    bellman = mean(((tar .- v′) .^ 2))
-                    fr_term = mean((v′ .- v_ref[inds]) .^ 2)
-                    critic_loss = bellman + 0.5 * fr_term # .* exp_m[:])
+                    bellman = mean(((tar .- values_pred) .^ 2))
+                    fr_term = mean((values_pred .- v_ref[inds]) .^ 2)
+                    critic_loss = bellman + 0.4 * fr_term # .* exp_m[:])
                     # critic2_loss = mean(((nv .- nv′) .^ 2)) # .* exp_m[:])
                 end
 
@@ -843,15 +869,25 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
             tar = rew + γ * nv′ .* (1 .- ter)
             tar = vec(targets_q)[inds]
 
+            old_v2 = vec(q_values)[inds]
+
             g_critic2 = Flux.gradient(AC.critic2) do critic2
                 critic2_values = critic2(vcat(s,a)) |> vec
+
+                if isnothing(clip_range_vf) || clip_range_vf == 0.0
+                    values_pred2 = critic2_values
+                else
+                    # clipped value function loss, from OpenAI SpinningUp implementation
+                    Δ = critic2_values .- old_v2
+                    values_pred2 = old_v2 .+ clamp.(Δ, -clip_range_vf, clip_range_vf)
+                end
 
                 if IL
                     critic2_loss = 0.0
                 else
-                    bellman = mean(((tar .- critic2_values) .^ 2))
-                    fr_term = mean((critic2_values .- q_ref[inds]) .^ 2)
-                    critic2_loss = bellman + 0.8 * fr_term # .* exp_m[:])
+                    bellman = mean(((tar .- values_pred2) .^ 2))
+                    fr_term = mean((values_pred2 .- q_ref[inds]) .^ 2)
+                    critic2_loss = bellman + 0.4 * fr_term # .* exp_m[:]
                 end
 
                 ignore() do
@@ -895,10 +931,10 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
     # println("mean logσ regularization loss: $(mean_logσ_regularization_loss)")
     # println("mean critic regularization loss: $(mean_critic_regularization_loss)")
 
-    mean_excitement = mean(abs.(excitements))
+    max_excitement = maximum(abs.(excitements))
     max_fear = maximum(abs.(fears))
     
-    println("mean excitement: $(mean_excitement)")
+    println("max excitement: $(max_excitement)")
     println("max fear: $(max_fear)")
 
     if p.adaptive_weights
@@ -910,7 +946,7 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
 
         # fear_factor_factor = clamp(((max_excitement * 0.04005) / (max_fear)), 0.5, 1.01)
 
-        new_factor_factor = mean_excitement * p.fear_scale
+        new_factor_factor = max_excitement * p.fear_scale
 
 
         # println("changing actor weight from $(w₁) to $(w₁*actor_factor)")
