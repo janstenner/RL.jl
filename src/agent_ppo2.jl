@@ -158,7 +158,7 @@ function create_critic_PPO2(;ns, na, use_gpu, init, nna_scale, drop_middle_layer
 end
 
 
-function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, critic_regularization_loss_weight=0.01f0, logσ_regularization_loss_weight=0.01f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 1.0, fear_scale = 0.5, new_loss = true)
+function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=100, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, critic_regularization_loss_weight=0.01f0, logσ_regularization_loss_weight=0.01f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 1.0, fear_scale = 0.5, new_loss = true)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -209,6 +209,7 @@ function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, updat
             max_grad_norm = 0.5f0,
             n_epochs = n_epochs,
             n_microbatches = n_microbatches,
+            actorbatch_size = actorbatch_size,
             actor_loss_weight = actor_loss_weight,
             critic_loss_weight = critic_loss_weight,
             entropy_loss_weight = entropy_loss_weight,
@@ -283,6 +284,7 @@ mutable struct PPOPolicy2{A<:ActorCritic2,D,R} <: AbstractPolicy
     clip_range_vf::Union{Nothing,Float32}
     max_grad_norm::Float32
     n_microbatches::Int
+    actorbatch_size::Int
     n_epochs::Int
     actor_loss_weight::Float32
     critic_loss_weight::Float32
@@ -323,8 +325,9 @@ function PPOPolicy2(;
     clip_range=0.2f0,
     clip_range_vf = 0.2f0,
     max_grad_norm=0.5f0,
-    n_microbatches=4,
-    n_epochs=4,
+    n_microbatches=1,
+    actorbatch_size = 32,
+    n_epochs=10,
     actor_loss_weight=1.0f0,
     critic_loss_weight=0.5f0,
     entropy_loss_weight=0.01f0,
@@ -356,6 +359,7 @@ function PPOPolicy2(;
         clip_range_vf,
         max_grad_norm,
         n_microbatches,
+        actorbatch_size,
         n_epochs,
         actor_loss_weight,
         critic_loss_weight,
@@ -594,6 +598,110 @@ function prepare_values(values, terminal)
 end
 
 
+
+
+
+# --- QUANTIL BERECHNUNG FÜR FEAR FACTOR --- #
+
+
+
+# --- optionaler Helfer für gewichtete Quantile innerhalb eines Batches ---
+function weighted_quantile(x::AbstractVector, w::AbstractVector, p::Real)
+    @assert length(x) == length(w)
+    idx = sortperm(x)
+    xs = x[idx]
+    ws = w[idx] .+ eps()             # Nullgewichte vermeiden
+    ws ./= sum(ws)
+    cdf = cumsum(ws)
+    k = searchsortedfirst(cdf, p)
+    return xs[clamp(k, 1, length(xs))]
+end
+
+
+"""
+    robust_quantiles(epsilons, adv_mags; p=0.9, weighted=true)
+
+Gibt ein NamedTuple mit:
+- q_eps  : p-Quantil von epsilons
+- q_adv  : p-Quantil von |adv_mags|
+- wq_eps : (optional) A-gew. p-Quantil von epsilons
+
+Hinweis: `epsilons[i]` und `adv_mags[i]` sollten zeitlich zusammenpassen
+(z.B. pro Epoche gemessene Kennzahlen).
+"""
+function robust_quantiles(epsilons::AbstractVector, adv_mags::AbstractVector; p=0.9, weighted::Bool=true)
+    @assert length(epsilons) == length(adv_mags) "Längen passen nicht zusammen"
+
+    # Filtere Nicht-Finite
+    mask = map(isfinite, epsilons) .& map(isfinite, adv_mags)
+    E = collect(epsilons[mask])
+    A = abs.(collect(adv_mags[mask]))
+
+    if isempty(E)
+        return (q_eps = NaN, q_adv = NaN, wq_eps = NaN)
+    end
+
+    # Ungewichtete Quantile
+    q_eps = quantile(E, p)
+    q_adv = quantile(A, p)
+
+    if !weighted
+        return (q_eps = q_eps, q_adv = q_adv)
+    end
+
+    # A-gewichtetes p-Quantil von E (einfacher, robuster Algorithmus)
+    # 1) Sortiere nach E
+    idx = sortperm(E)
+    Es = E[idx]
+    Ws = A[idx] .+ eps() # mini-offset gegen Nullgewichte
+    Ws ./= sum(Ws)
+
+    # 2) Finde kleinste Stelle, wo die kumulative Gewichtssumme ≥ p ist
+    cdf = cumsum(Ws)
+    k = searchsortedfirst(cdf, p)
+    k = clamp(k, 1, length(Es))
+    wq_eps = Es[k]
+
+    return (q_eps = q_eps, q_adv = q_adv, wq_eps = wq_eps)
+end
+
+# --- Collector für Batch-Quantile während einer Epoche ---
+mutable struct BatchQuantileCollector
+    eps_qs::Vector{Float64}   # pro Batch: p-Quantil von |r-1|
+    adv_qs::Vector{Float64}   # pro Batch: p-Quantil von |A|
+end
+BatchQuantileCollector() = BatchQuantileCollector(Float64[], Float64[])
+
+"""
+    update!(c, ratio, adv; p=0.9, within_batch_weighted=false)
+
+Ermittelt pro Batch das p-Quantil von |ratio-1| (optional A-gewichtet)
+und das p-Quantil von |adv|. Schreibt die Werte in den Collector.
+"""
+function update!(c::BatchQuantileCollector, ratio, adv; p=0.9, within_batch_weighted::Bool=false)
+    eps = abs.(ratio .- 1)
+    A   = abs.(adv)
+
+    q_eps_batch = within_batch_weighted ? weighted_quantile(eps, A, p) : quantile(eps, p)
+    q_adv_batch = quantile(A, p)
+
+    push!(c.eps_qs, float(q_eps_batch))
+    push!(c.adv_qs, float(q_adv_batch))
+    return nothing
+end
+
+"""
+    finalize(c; p_over_epochs=0.9, weighted=true)
+
+Aggregiert die über die Epoche gesammelten Batch-Quantile weiter zu
+robusten Kennzahlen (Quantil über die Batch-Quantile; optional A-gewichtet).
+"""
+function finalize(c::BatchQuantileCollector; p_over_epochs=0.9, weighted::Bool=true)
+    return robust_quantiles(c.eps_qs, c.adv_qs; p=p_over_epochs, weighted=weighted)
+end
+
+
+
 function _update!(p::PPOPolicy2, t::Any; IL=false)
     rng = p.rng
     AC = p.approximator
@@ -614,6 +722,7 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
     n_envs, n_rollout = size(t[:terminal])
     
     microbatch_size = Int(floor(n_envs * n_rollout ÷ n_microbatches))
+    actorbatch_size = p.actorbatch_size
 
     n = length(t)
     states = to_device(t[:state])
@@ -670,11 +779,6 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
     critic_losses = Float32[]
     critic2_losses = Float32[]
     entropy_losses = Float32[]
-    logσ_regularization_losses = Float32[]
-    critic_regularization_losses = Float32[]
-
-    excitements = Float32[]
-    fears = Float32[]
 
 
 
@@ -707,12 +811,19 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
     next_q_values = reshape( AC.critic2( vcat(next_states, AC.actor.μ( next_states) ) ), n_envs, :)
     targets_q = td_lambda_targets(rewards, terminal, next_q_values, γ; λ=0.7f0)[:]
 
+    collector = BatchQuantileCollector()
+    
+
+    rand_inds = shuffle!(rng, Vector(1:n_envs*n_rollout))
+
     for epoch in 1:n_epochs
 
-        rand_inds = shuffle!(rng, Vector(1:n_envs*n_rollout))
+        
         for i in 1:n_microbatches
 
             inds = rand_inds[(i-1)*microbatch_size+1:i*microbatch_size]
+
+            inds_actor = inds[1:clamp(actorbatch_size, 1, length(inds))]
 
             #inds = positive_advantage_indices
 
@@ -776,7 +887,9 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
                     end
                 end
 
-                fear = (abs.((ratio .- 1)) + ones(size(ratio))).^1.3 .* p.fear_factor
+                
+                #fear = (abs.((ratio .- 1)) + ones(size(ratio))).^1.3 .* p.fear_factor
+                fear = (ratio .- 1).^2 .* p.fear_factor
 
                 # if !(isempty(s_neg))
                 #     v_neg = critic(s_neg)
@@ -793,7 +906,8 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
                 # end
 
                 if p.new_loss
-                    actor_loss = -mean(((ratio .* adv) - fear)  .* exp_m[:])
+                    actor_loss_values = ((ratio .* adv) - fear)  .* exp_m[:]
+                    actor_loss = -mean(actor_loss_values[inds_actor])
                 else
                     surr1 = ratio .* adv
                     surr2 = clamp.(ratio, 1.0f0 - clip_range, 1.0f0 + clip_range) .* adv
@@ -837,8 +951,10 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
                     # push!(critic_regularization_losses, w₄ * critic_regularization)
                     # push!(logσ_regularization_losses, w₅ * logσ_regularization)
 
-                    push!(excitements, maximum(adv))
-                    push!(fears, maximum(fear))
+
+                    #println(maximum(abs.(ratio .- 1)))
+
+                    update!(collector, ratio, adv; p=0.9, within_batch_weighted=true)
 
                     # polyak update critic target
                     # p.critic_target = p.critic_target * 0.9 + (maximum(r) - 0.1) * 0.1
@@ -931,22 +1047,51 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
     # println("mean logσ regularization loss: $(mean_logσ_regularization_loss)")
     # println("mean critic regularization loss: $(mean_critic_regularization_loss)")
 
-    max_excitement = maximum(abs.(excitements))
-    max_fear = maximum(abs.(fears))
+    q = finalize(collector; p_over_epochs=0.9, weighted=true)
+
+    # q.q_eps   : 0.9-Quantil der (pro Batch) 0.9-Quantile von |r-1|
+    # q.q_adv   : 0.9-Quantil der (pro Batch) 0.9-Quantile von |A|
+    # q.wq_eps  : A-gewichtetes 0.9-Quantil über die Batch-Quantile von |r-1|
+
     
-    println("max excitement: $(max_excitement)")
-    println("max fear: $(max_fear)")
+    println("0.9-Quantil excitement: $(q.q_adv)")
+    println("weighted 0.9-Quantil |r-1|: $(q.wq_eps)")
 
-    if p.adaptive_weights
-        # actor_factor = clamp(1.0/mean_actor_loss, 0.99, 1.01)
-        # critic_factor = clamp(0.5/mean_critic_loss, 0.99, 1.01)
-        # entropy_factor = clamp(0.01/mean_entropy_loss, 0.99, 1.01)
-        # logσ_regularization_factor = clamp(0.1/mean_logσ_regularization_loss, 0.9, 1.1)
-        # critic_regularization_factor = clamp(0.3*mean_critic_loss/mean_critic_regularization_loss, 0.9, 1.1)
+    if p.adaptive_weights && (p.update_step / p.update_freq) % 4 == 0
 
-        # fear_factor_factor = clamp(((max_excitement * 0.04005) / (max_fear)), 0.5, 1.01)
+        old_fear_factor = deepcopy(p.fear_factor)
 
-        new_factor_factor = max_excitement * p.fear_scale
+        A_ref = q.q_adv                          # robustes |A|-Quantil
+        eps_meas = q.wq_eps
+        eps_target = 0.1                         # Zielwert für |r-1|
+
+        # Guardrails / Fallbacks
+        if !isfinite(eps_meas) || eps_meas <= 0
+            eps_meas = eps_target                # Startfall oder Degenerat
+        end
+        if !isfinite(A_ref) || A_ref <= 0
+            A_ref = 1.0                          # konservativer Fallback
+        end
+
+        # Baseline λ* aus Größenordnungs-Match nahe r≈1
+        λ_star = 0.35 * (A_ref / eps_target)
+
+        λ_prev = p.fear_factor
+        gamma = 1.0
+        beta = 0.9
+
+        lambda_min = 1e-3
+        lambda_max = 1e2
+
+        # Regler-Update
+        factor = (eps_meas / eps_target)^gamma
+        λ_raw = (1 - beta) * λ_prev + beta * λ_star * factor
+
+        # Clamping & Sanity
+        λ_next = clamp(λ_raw, lambda_min, lambda_max)
+
+        # polyak update fear_factor
+        p.fear_factor = λ_next
 
 
         # println("changing actor weight from $(w₁) to $(w₁*actor_factor)")
@@ -954,7 +1099,7 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
         # println("changing entropy weight from $(w₃) to $(w₃*entropy_factor)")
         # println("changing logσ regularization weight from $(w₅) to $(w₅*logσ_regularization_factor)")
         # println("changing critic regularization weight from $(w₄) to $(w₄*critic_regularization_factor)")
-        println("changing fear factor from $(p.fear_factor) to $(p.fear_factor * 0.9 + new_factor_factor * 0.1)")
+        println("changing fear factor from $(old_fear_factor) to $(λ_next)")
 
         # println("current critic_target is $(p.critic_target)")
 
@@ -964,8 +1109,7 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
         # p.logσ_regularization_loss_weight = w₅ * logσ_regularization_factor
         # p.critic_regularization_loss_weight = w₄ * critic_regularization_factor
 
-        # polyak update fear_factor
-        p.fear_factor = p.fear_factor * 0.9 + new_factor_factor * 0.1
+        
     end
 
     println("---")
