@@ -5,16 +5,14 @@ Base.@kwdef mutable struct PPOPolicy3{A<:ActorCritic2,D,R} <: AbstractPolicy
     λ::Float32 = 0.99f0
     clip_range::Float32 = 0.2f0
     clip_range_vf::Union{Nothing,Float32} = 0.2f0
-    max_grad_norm::Float32 = 0.5f0
     n_microbatches::Int = 1
     actorbatch_size::Int = 32
     n_epochs::Int = 5
-    actor_loss_weight::Float32 = 1.0f0
-    critic_loss_weight::Float32 = 0.5f0
-    entropy_loss_weight::Float32 = 0.01f0
+    actor_loss_weight = 1.0f0
+    critic_loss_weight = 0.5f0
+    entropy_loss_weight = 0.01f0
     adaptive_weights::Bool = true
     rng::R = Random.GLOBAL_RNG
-    n_random_start::Int = 0
     update_freq::Int = 2048
     update_step::Int = 0
     clip1::Bool = false
@@ -30,9 +28,9 @@ Base.@kwdef mutable struct PPOPolicy3{A<:ActorCritic2,D,R} <: AbstractPolicy
     fear_scale = 0.4f0
     new_loss::Bool = true
     mm = ModulationModule()
-    last_action_log_prob::Vector{Float32} = [0.0]
-    last_sigma::Vector{Float32} = [0.0]
-    last_mu::Vector{Float32} = [0.0]
+    last_action_log_prob::Vector{Float32} = [0.0f0]
+    last_sigma::Vector{Float32} = [0.0f0]
+    last_mu::Vector{Float32} = [0.0f0]
 end
 
 
@@ -40,7 +38,7 @@ end
 
 
 
-function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=100, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 0.1, fear_scale = 0.4, new_loss = true)
+function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=100, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 0.1, fear_scale = 0.4, new_loss = true, dist = Normal)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -63,12 +61,10 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
     critic = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic)
     critic_frozen = deepcopy(critic)
 
-    critic2 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic, is_critic2 = true)
+    critic2 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic)
     critic2_frozen = deepcopy(critic2)
 
-    Agent(
-        policy = PPOPolicy3(
-            approximator = isnothing(approximator) ? ActorCritic2(
+    approximator = isnothing(approximator) ? ActorCritic2(
                 actor = GaussianNetwork(
                     μ = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = tanh_end),
                     logσ = create_logσ(logσ_is_network = logσ_is_network, ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, start_logσ = start_logσ),
@@ -83,12 +79,15 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
                 optimizer_sigma = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
                 optimizer_critic = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate_critic, betas)),
                 optimizer_critic2 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate_critic, betas)),
-            ) : approximator,
+            ) : approximator
+
+    Agent(
+        policy = PPOPolicy3{typeof(approximator),dist,typeof(rng)}(
+            approximator = approximator,
             γ = y,
             λ = p,
             clip_range = clip_range,
             clip_range_vf = clip_range_vf,
-            max_grad_norm = 0.5f0,
             n_epochs = n_epochs,
             n_microbatches = n_microbatches,
             actorbatch_size = actorbatch_size,
@@ -96,7 +95,6 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
             critic_loss_weight = critic_loss_weight,
             entropy_loss_weight = entropy_loss_weight,
             adaptive_weights = adaptive_weights,
-            dist = Normal,
             rng = rng,
             update_freq = update_freq,
             clip1 = clip1,
@@ -138,14 +136,9 @@ function prob(
     state::AbstractArray,
     mask,
 )
-    if p.update_step < p.n_random_start
-        @error "todo"
-    else
-        μ, logσ =
-            p.approximator.actor(send_to_device(device(p.approximator), state)) |>
-            send_to_host
-        StructArray{Normal}((μ, exp.(logσ)))
-    end
+    μ, logσ = p.approximator.actor(send_to_device(device(p.approximator), state)) |> send_to_host
+
+    StructArray{Normal}((μ, exp.(logσ)))
 end
 
 function prob(p::PPOPolicy3{<:ActorCritic2,Categorical}, state::AbstractArray, mask)
@@ -154,14 +147,8 @@ function prob(p::PPOPolicy3{<:ActorCritic2,Categorical}, state::AbstractArray, m
         logits .+= ifelse.(mask, 0.0f0, typemin(Float32))
     end
     logits = logits |> softmax |> send_to_host
-    if p.update_step < p.n_random_start
-        [
-            Categorical(fill(1 / length(x), length(x)); check_args=false) for
-            x in eachcol(logits)
-        ]
-    else
-        [Categorical(x; check_args=false) for x in eachcol(logits)]
-    end
+    
+    [Categorical(x; check_args=false) for x in eachcol(logits)]
 end
 
 function prob(p::PPOPolicy3, env::MultiThreadEnv)
@@ -291,156 +278,125 @@ end
 
 
 
-"""
-    sample_negatives_far(x_batch; m=size(x_batch,2), δ=0.1,
-                         max_attempts=1_000, sample_fn=()->randn(eltype(x_batch), size(x_batch,1)))
+function nstep_targets(
+    rewards::Vector{Float32},
+    dones::Vector{Bool},
+    next_values::Vector{Float32},
+    γ::Float32=0.99f0;
+    n::Int=3
+) :: Vector{Float32}
+    T = length(rewards)
+    targets = similar(rewards)
+    for t in 1:T
+        g = 0f0
+        discount = 1f0
+        hit_done = false
 
-Draw up to `m` vectors in ℝⁿ (same n as `x_batch`) so that each new vector is at least
-Euclidean distance `δ` from *every* column of `x_batch`.  By default samples
-from N(0,1). Throws an error if it fails `max_attempts` times for any sample.
-"""
-function sample_negatives_far(x_batch::AbstractMatrix{T};
-                              m::Int=size(x_batch,2),
-                              δ::Real=0.1,
-                              max_attempts::Int=1_000,
-                              sample_fn::Function=()->randn(eltype(x_batch), size(x_batch,1))) where {T}
-
-    δ2 = δ^2
-    x_neg = Vector{Vector{T}}() 
-
-    for i in 1:m
-        attempt = 0
-        while max_attempts > attempt
-            attempt += 1
-            cand = sample_fn()
-            # compute squared distances to every column in x_batch
-            d2 = sum((x_batch .- cand).^2; dims=1)
-            if minimum(d2) ≥ δ2
-                push!(x_neg, cand)
+        # k-Schritte von Belohnungen sammeln
+        for k in 0:(n-1)
+            idx = t + k
+            if idx > T
                 break
             end
+            g += discount * rewards[idx]
+            if dones[idx]        # Episode endet hier
+                hit_done = true
+                break
+            end
+            discount *= γ
         end
-    end
 
-    return hcat(x_neg...)
-end
-
-
-function prepare_values(values, terminal)
-    offset_value = 0.0
-
-    for i in length(values):-1:1
-        if terminal[i]
-            offset_value = values[i]
+        # Nur bootstrappen, wenn in den ersten n Schritten kein Done war
+        idxn = t + n - 1
+        if !hit_done && idxn ≤ T && !dones[idxn]
+            g += discount * next_values[idxn]
         end
-        values[i] -= offset_value
+
+        targets[t] = g
+    end
+    return targets
+end
+
+
+function td_lambda_targets(
+    rewards::Vector{Float32},
+    dones::Vector{Bool},
+    next_values::Vector{Float32},
+    γ::Float32=0.99f0;
+    λ::Float32=0.7f0
+) :: Vector{Float32}
+    T = length(rewards)
+    targets = similar(rewards)
+    Gλ = 0f0
+    for t in T:-1:1
+        # für Schritt t ist next_values[t] = V(s_{t+1})
+        Gλ = rewards[t] + γ * ((1f0-λ)*next_values[t] + λ*Gλ) * (1 - dones[t])
+        targets[t] = Gλ
+    end
+    return targets
+end
+
+function td_lambda_targets(
+    rewards::AbstractMatrix,
+    dones::AbstractMatrix,
+    next_values::AbstractMatrix,
+    γ::Float32=0.99f0;
+    λ::Float32=0.7f0,
+) :: AbstractMatrix
+
+    results = zeros(Float32, size(rewards))
+
+    for i in 1:size(rewards, 1)
+        results[i, :] = td_lambda_targets(rewards[i, :], dones[i, :], next_values[i, :], γ; λ=λ)
     end
 
-    return values
+    return results
 end
 
 
+function lambda_truncated_targets(
+    rewards::Vector{Float32},
+    dones::Vector{Bool},
+    next_values::Vector{Float32},
+    γ::Float32=0.99f0;
+    λ::Float32=0.7f0,
+    n::Int=3
+) :: Vector{Float32}
 
+    # berechne alle k‑Step‑Returns mit next_values
+    Gs = [nstep_targets(rewards, dones, next_values, γ; n=k) for k in 1:n]
 
-
-# --- QUANTIL BERECHNUNG FÜR FEAR FACTOR --- #
-
-
-
-# --- optionaler Helfer für gewichtete Quantile innerhalb eines Batches ---
-function weighted_quantile(x::AbstractVector, w::AbstractVector, p::Real)
-    @assert length(x) == length(w)
-    idx = sortperm(x)
-    xs = x[idx]
-    ws = w[idx] .+ eps()             # Nullgewichte vermeiden
-    ws ./= sum(ws)
-    cdf = cumsum(ws)
-    k = searchsortedfirst(cdf, p)
-    return xs[clamp(k, 1, length(xs))]
+    T = length(rewards)
+    targets = similar(rewards)
+    for t in 1:T
+        sum_part = 0f0
+        for k in 1:(n-1)
+            sum_part += (1f0-λ)*λ^(k-1) * Gs[k][t]
+        end
+        sum_part += λ^(n-1) * Gs[n][t]
+        targets[t] = sum_part
+    end
+    return targets
 end
 
+function lambda_truncated_targets(
+    rewards::AbstractMatrix,
+    dones::AbstractMatrix,
+    next_values::AbstractMatrix,
+    γ::Float32=0.99f0;
+    λ::Float32=0.7f0,
+    n::Int=3
+) :: AbstractMatrix
 
-"""
-    robust_quantiles(epsilons, adv_mags; p=0.9, weighted=true)
+    results = zeros(Float32, size(rewards))
 
-Gibt ein NamedTuple mit:
-- q_eps  : p-Quantil von epsilons
-- q_adv  : p-Quantil von |adv_mags|
-- wq_eps : (optional) A-gew. p-Quantil von epsilons
-
-Hinweis: `epsilons[i]` und `adv_mags[i]` sollten zeitlich zusammenpassen
-(z.B. pro Epoche gemessene Kennzahlen).
-"""
-function robust_quantiles(epsilons::AbstractVector, adv_mags::AbstractVector; p=0.9, weighted::Bool=true)
-    @assert length(epsilons) == length(adv_mags) "Längen passen nicht zusammen"
-
-    # Filtere Nicht-Finite
-    mask = map(isfinite, epsilons) .& map(isfinite, adv_mags)
-    E = collect(epsilons[mask])
-    A = abs.(collect(adv_mags[mask]))
-
-    if isempty(E)
-        return (q_eps = NaN, q_adv = NaN, wq_eps = NaN)
+    for i in 1:size(rewards, 1)
+        results[i, :] = lambda_truncated_targets(rewards[i, :], dones[i, :], next_values[i, :], γ; λ=λ, n=n)
     end
 
-    # Ungewichtete Quantile
-    q_eps = quantile(E, p)
-    q_adv = quantile(A, p)
-
-    if !weighted
-        return (q_eps = q_eps, q_adv = q_adv)
-    end
-
-    # A-gewichtetes p-Quantil von E (einfacher, robuster Algorithmus)
-    # 1) Sortiere nach E
-    idx = sortperm(E)
-    Es = E[idx]
-    Ws = A[idx] .+ eps() # mini-offset gegen Nullgewichte
-    Ws ./= sum(Ws)
-
-    # 2) Finde kleinste Stelle, wo die kumulative Gewichtssumme ≥ p ist
-    cdf = cumsum(Ws)
-    k = searchsortedfirst(cdf, p)
-    k = clamp(k, 1, length(Es))
-    wq_eps = Es[k]
-
-    return (q_eps = q_eps, q_adv = q_adv, wq_eps = wq_eps)
+    return results
 end
 
-# --- Collector für Batch-Quantile während einer Epoche ---
-mutable struct BatchQuantileCollector
-    eps_qs::Vector{Float64}   # pro Batch: p-Quantil von |r-1|
-    adv_qs::Vector{Float64}   # pro Batch: p-Quantil von |A|
-end
-BatchQuantileCollector() = BatchQuantileCollector(Float64[], Float64[])
-
-"""
-    update!(c, ratio, adv; p=0.9, within_batch_weighted=false)
-
-Ermittelt pro Batch das p-Quantil von |ratio-1| (optional A-gewichtet)
-und das p-Quantil von |adv|. Schreibt die Werte in den Collector.
-"""
-function update!(c::BatchQuantileCollector, ratio, adv; p=0.9, within_batch_weighted::Bool=false)
-    eps = abs.(ratio .- 1)
-    A   = abs.(adv)
-
-    q_eps_batch = within_batch_weighted ? weighted_quantile(eps, A, p) : quantile(eps, p)
-    q_adv_batch = quantile(A, p)
-
-    push!(c.eps_qs, float(q_eps_batch))
-    push!(c.adv_qs, float(q_adv_batch))
-    return nothing
-end
-
-"""
-    finalize(c; p_over_epochs=0.9, weighted=true)
-
-Aggregiert die über die Epoche gesammelten Batch-Quantile weiter zu
-robusten Kennzahlen (Quantil über die Batch-Quantile; optional A-gewichtet).
-"""
-function finalize(c::BatchQuantileCollector; p_over_epochs=0.9, weighted::Bool=true)
-    return robust_quantiles(c.eps_qs, c.adv_qs; p=p_over_epochs, weighted=weighted)
-end
 
 
 
@@ -456,8 +412,6 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
     w₁ = p.actor_loss_weight
     w₂ = p.critic_loss_weight
     w₃ = p.entropy_loss_weight
-    w₄ = p.critic_regularization_loss_weight
-    w₅ = p.logσ_regularization_loss_weight
     D = device(AC)
     to_device(x) = send_to_device(D, x)
 
@@ -468,30 +422,33 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
 
     n = length(t)
     states = to_device(t[:state])
-    next_states = to_device(t[:next_state])
+    #next_states = to_device(t[:next_state])
     actions = to_device(t[:action])
 
     states_flatten_on_host = flatten_batch(select_last_dim(t[:state], 1:n))
-    next_states_flatten_on_host = flatten_batch(select_last_dim(t[:next_state], 1:n))
+    #next_states_flatten_on_host = flatten_batch(select_last_dim(t[:next_state], 1:n))
 
     values = reshape(send_to_host(AC.critic(flatten_batch(states))), n_envs, :)
 
     #values = prepare_values(values, t[:terminal])
 
-    mus = AC.actor.μ(states_flatten_on_host)
-    offsets = reshape(send_to_host( AC.critic2( vcat(flatten_batch(states), mus) )) , n_envs, :)
+    #mus = AC.actor.μ(states_flatten_on_host)
+    #offsets = reshape(send_to_host( AC.critic2( vcat(flatten_batch(states), mus) )) , n_envs, :)
 
     # advantages = reshape(send_to_host( AC.critic2( vcat(flatten_batch(states), flatten_batch(actions)) )) , n_envs, :) - offsets
 
 
-    q_values = reshape(send_to_host( AC.critic2( vcat(flatten_batch(states), flatten_batch(actions)) )) , n_envs, :)
+    critic2_values = reshape(send_to_host( AC.critic2( flatten_batch(states)) ) , n_envs, :)
 
-    deltas = q_values - offsets
+    gae_deltas = t[:reward] .+ critic2_values .* (1 .- t[:terminal]) .- critic2_values
+
+    #@show size(gae_deltas)
+
 
     advantages, returns = generalized_advantage_estimation(
-        deltas,
-        zeros(Float32, size(deltas)),
-        zeros(Float32, size(deltas)),
+        gae_deltas,
+        zeros(Float32, size(gae_deltas)),
+        zeros(Float32, size(gae_deltas)),
         γ,
         λ;
         dims=2,
@@ -541,14 +498,14 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
 
     v_ref = AC.critic_frozen( to_device(flatten_batch(t[:state])) )[:] 
 
-    q_ref = AC.critic2_frozen( vcat(to_device(flatten_batch(t[:state])), to_device(flatten_batch(t[:action]))) )[:] 
+    q_ref = AC.critic2_frozen( to_device(flatten_batch(t[:state])) )[:] 
 
 
     next_values = reshape( AC.critic( next_states ), n_envs, :)
     targets = lambda_truncated_targets(rewards, terminal, next_values, γ)[:]
 
-    next_q_values = reshape( AC.critic2( vcat(next_states, AC.actor.μ( next_states) ) ), n_envs, :)
-    targets_q = td_lambda_targets(rewards, terminal, next_q_values, γ; λ=0.7f0)[:]
+    next_critic2_values = reshape( AC.critic2( next_states ), n_envs, :)
+    targets_critic2 = td_lambda_targets(zeros(Float32, size(rewards)), terminal, next_critic2_values, γ; λ=0.7f0)[:]
 
     collector = BatchQuantileCollector()
     
@@ -569,7 +526,6 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
             # s = to_device(select_last_dim(states_flatten_on_host, inds))
             # !!! we need to convert it into a continuous CuArray otherwise CUDA.jl will complain scalar indexing
             s = to_device(collect(select_last_dim(states_flatten_on_host, inds)))
-            ns = to_device(collect(select_last_dim(next_states_flatten_on_host, inds)))
             a = to_device(collect(select_last_dim(actions_flatten, inds)))
             exp_m = to_device(collect(select_last_dim(explore_mod, inds)))
 
@@ -717,17 +673,17 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
 
 
 
-            nv′ = vec(next_values)[inds]
-            rew = vec(rewards)[inds]
-            ter = vec(terminal)[inds]
+            # nv′ = vec(next_values)[inds]
+            # rew = vec(rewards)[inds]
+            # ter = vec(terminal)[inds]
 
-            tar = rew + γ * nv′ .* (1 .- ter)
-            tar = vec(targets_q)[inds]
+            #tar = rew + γ * nv′ .* (1 .- ter)
+            tar = vec(targets_critic2)[inds]
 
-            old_v2 = vec(q_values)[inds]
+            old_v2 = vec(critic2_values)[inds]
 
             g_critic2 = Flux.gradient(AC.critic2) do critic2
-                critic2_values = critic2(vcat(s,a)) |> vec
+                critic2_values = critic2(s) |> vec
 
                 if isnothing(clip_range_vf) || clip_range_vf == 0.0
                     values_pred2 = critic2_values
