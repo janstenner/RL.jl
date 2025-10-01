@@ -399,6 +399,109 @@ end
 
 
 
+# -- PPO3 special target functions -- #
+
+function nstep_targets_ppo3(
+    rewards::Vector{Float32},
+    dones::Vector{Bool},
+    next_values::Vector{Float32},
+    γ::Float32=0.99f0;
+    n::Int=3
+) :: Vector{Float32}
+    T = length(rewards)
+    targets = similar(rewards)
+    for t in 1:T
+        g = 0f0
+        discount = γ
+        hit_done = false
+
+        # k-Schritte von Belohnungen sammeln
+        for k in 1:(n-1)
+            idx = t + k
+            if idx > T
+                break
+            end
+            g += discount * rewards[idx]
+            if dones[idx]        # Episode endet hier
+                hit_done = true
+                break
+            end
+            discount *= γ
+        end
+
+        # Nur bootstrappen, wenn in den ersten n Schritten kein Done war
+        idxn = t + n - 1
+        if !hit_done && idxn ≤ T && !dones[idxn]
+            g += discount * next_values[idxn]
+        end
+
+        targets[t] = g
+    end
+    return targets
+end
+
+function nstep_targets_ppo3(
+    rewards::AbstractMatrix,
+    dones::AbstractMatrix,
+    next_values::AbstractMatrix,
+    γ::Float32=0.99f0;
+    n::Int=3
+) :: AbstractMatrix
+
+    results = zeros(Float32, size(rewards))
+
+    for i in 1:size(rewards, 1)
+        results[i, :] = nstep_targets_ppo3(rewards[i, :], dones[i, :], next_values[i, :], γ; n=n)
+    end
+
+    return results
+end
+
+function lambda_truncated_targets_ppo3(
+    rewards::Vector{Float32},
+    dones::Vector{Bool},
+    next_values::Vector{Float32},
+    γ::Float32=0.99f0;
+    λ::Float32=0.7f0,
+    n::Int=3
+) :: Vector{Float32}
+
+    # berechne alle k‑Step‑Returns mit next_values
+    Gs = [nstep_targets_ppo3(rewards, dones, next_values, γ; n=k) for k in 1:n]
+
+    T = length(rewards)
+    targets = similar(rewards)
+    for t in 1:T
+        sum_part = 0f0
+        for k in 1:(n-1)
+            sum_part += (1f0-λ)*λ^(k-1) * Gs[k][t]
+        end
+        sum_part += λ^(n-1) * Gs[n][t]
+        targets[t] = sum_part
+    end
+    return targets
+end
+
+function lambda_truncated_targets_ppo3(
+    rewards::AbstractMatrix,
+    dones::AbstractMatrix,
+    next_values::AbstractMatrix,
+    γ::Float32=0.99f0;
+    λ::Float32=0.7f0,
+    n::Int=3
+) :: AbstractMatrix
+
+    results = zeros(Float32, size(rewards))
+
+    for i in 1:size(rewards, 1)
+        results[i, :] = lambda_truncated_targets_ppo3(rewards[i, :], dones[i, :], next_values[i, :], γ; λ=λ, n=n)
+    end
+
+    return results
+end
+
+
+
 
 function _update!(p::PPOPolicy3, t::Any; IL=false)
     rng = p.rng
@@ -505,7 +608,7 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
     targets = lambda_truncated_targets(rewards, terminal, next_values, γ)[:]
 
     next_critic2_values = reshape( AC.critic2( next_states ), n_envs, :)
-    targets_critic2 = td_lambda_targets(zeros(Float32, size(rewards)), terminal, next_critic2_values, γ; λ=0.7f0)[:]
+    targets_critic2 = lambda_truncated_targets_ppo3(rewards, terminal, next_values, γ)[:]
 
     collector = BatchQuantileCollector()
     
@@ -683,13 +786,13 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
             old_v2 = vec(critic2_values)[inds]
 
             g_critic2 = Flux.gradient(AC.critic2) do critic2
-                critic2_values = critic2(s) |> vec
+                v2′ = critic2(s) |> vec
 
                 if isnothing(clip_range_vf) || clip_range_vf == 0.0
-                    values_pred2 = critic2_values
+                    values_pred2 = v2′
                 else
                     # clipped value function loss, from OpenAI SpinningUp implementation
-                    Δ = critic2_values .- old_v2
+                    Δ = v2′ .- old_v2
                     values_pred2 = old_v2 .+ clamp.(Δ, -clip_range_vf, clip_range_vf)
                 end
 
