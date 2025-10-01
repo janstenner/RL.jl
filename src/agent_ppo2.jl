@@ -759,15 +759,12 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
     # returns = to_device(advantages .+ select_last_dim(values, 1:n_rollout))
     advantages = to_device(advantages)
 
-    if p.normalize_advantage
-        advantages = (advantages .- mean(advantages)) ./ clamp(std(advantages), 1e-8, 1000.0)
-    end
-
-    positive_advantage_indices = findall(>(0), vec(advantages))
-
     # if p.normalize_advantage
     #     advantages = (advantages .- mean(advantages)) ./ clamp(std(advantages), 1e-8, 1000.0)
     # end
+
+    positive_advantage_indices = findall(>(0), vec(advantages))
+
 
     actions_flatten = flatten_batch(select_last_dim(t[:action], 1:n))
     action_log_probs = select_last_dim(to_device(t[:action_log_prob]), 1:n)
@@ -850,9 +847,9 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
 
             clamp!(log_p, log(1e-8), Inf) # clamp old_prob to 1e-8 to avoid inf
 
-            # if p.normalize_advantage
-            #     adv = (adv .- mean(adv)) ./ clamp(std(adv), 1e-8, 1000.0)
-            # end
+            if p.normalize_advantage
+                adv = (adv .- mean(adv)) ./ clamp(std(adv), 1e-8, 1000.0)
+            end
 
             # s_neg = sample_negatives_far(s)
 
