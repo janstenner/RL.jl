@@ -1,7 +1,46 @@
 
+Base.@kwdef mutable struct PPOPolicy3{A<:ActorCritic2,D,R} <: AbstractPolicy
+    approximator::A
+    γ::Float32 = 0.99f0
+    λ::Float32 = 0.99f0
+    clip_range::Float32 = 0.2f0
+    clip_range_vf::Union{Nothing,Float32} = 0.2f0
+    max_grad_norm::Float32 = 0.5f0
+    n_microbatches::Int = 1
+    actorbatch_size::Int = 32
+    n_epochs::Int = 5
+    actor_loss_weight::Float32 = 1.0f0
+    critic_loss_weight::Float32 = 0.5f0
+    entropy_loss_weight::Float32 = 0.01f0
+    adaptive_weights::Bool = true
+    rng::R = Random.GLOBAL_RNG
+    n_random_start::Int = 0
+    update_freq::Int = 2048
+    update_step::Int = 0
+    clip1::Bool = false
+    normalize_advantage::Bool = true
+    start_steps = -1
+    start_policy = nothing
+    target_kl = 100.0
+    noise = nothing
+    noise_sampler = nothing
+    noise_scale = 90.0
+    noise_step = 0
+    fear_factor = 0.1f0
+    fear_scale = 0.4f0
+    new_loss::Bool = true
+    mm = ModulationModule()
+    last_action_log_prob::Vector{Float32} = [0.0]
+    last_sigma::Vector{Float32} = [0.0]
+    last_mu::Vector{Float32} = [0.0]
+end
 
 
-function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=100, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, critic_regularization_loss_weight=0.01f0, logσ_regularization_loss_weight=0.01f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 1.0, fear_scale = 0.5, new_loss = true)
+
+
+
+
+function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=100, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 0.1, fear_scale = 0.4, new_loss = true)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -56,8 +95,6 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
             actor_loss_weight = actor_loss_weight,
             critic_loss_weight = critic_loss_weight,
             entropy_loss_weight = entropy_loss_weight,
-            critic_regularization_loss_weight = critic_regularization_loss_weight,
-            logσ_regularization_loss_weight = logσ_regularization_loss_weight,
             adaptive_weights = adaptive_weights,
             dist = Normal,
             rng = rng,
@@ -91,148 +128,10 @@ end
 
 
 
-"""
-    PPOPolicy3(;kwargs)
-
-# Keyword arguments
-
-- `approximator`,
-- `γ = 0.99f0`,
-- `λ = 0.95f0`,
-- `clip_range = 0.2f0`,
-- `max_grad_norm = 0.5f0`,
-- `n_microbatches = 4`,
-- `n_epochs = 4`,
-- `actor_loss_weight = 1.0f0`,
-- `critic_loss_weight = 0.5f0`,
-- `entropy_loss_weight = 0.01f0`,
-- `dist = Categorical`,
-- `rng = Random.GLOBAL_RNG`,
-
-If `dist` is set to `Categorical`, it means it will only work
-on environments of discrete actions. To work with environments of continuous
-actions `dist` should be set to `Normal` and the `actor` in the `approximator`
-should be a `GaussianNetwork`. Using it with a `GaussianNetwork` supports 
-multi-dimensional action spaces, though it only supports it under the assumption
-that the dimensions are independent since the `GaussianNetwork` outputs a single
-`μ` and `σ` for each dimension which is used to simplify the calculations.
-"""
 
 
-mutable struct PPOPolicy3{A<:ActorCritic2,D,R} <: AbstractPolicy
-    approximator::A
-    γ::Float32
-    λ::Float32
-    clip_range::Float32
-    clip_range_vf::Union{Nothing,Float32}
-    max_grad_norm::Float32
-    n_microbatches::Int
-    actorbatch_size::Int
-    n_epochs::Int
-    actor_loss_weight::Float32
-    critic_loss_weight::Float32
-    entropy_loss_weight::Float32
-    critic_regularization_loss_weight::Float32
-    logσ_regularization_loss_weight::Float32
-    adaptive_weights::Bool
-    rng::R
-    n_random_start::Int
-    update_freq::Int
-    update_step::Int
-    clip1::Bool
-    normalize_advantage::Bool
-    start_steps
-    start_policy
-    target_kl
-    noise
-    noise_sampler
-    noise_scale
-    noise_step
-    fear_factor
-    fear_scale
-    new_loss::Bool
-    mm
-    critic_target
-    last_action_log_prob::Vector{Float32}
-    last_sigma::Vector{Float32}
-    last_mu::Vector{Float32}
-end
 
-function PPOPolicy3(;
-    approximator,
-    update_freq,
-    n_random_start=0,
-    update_step=0,
-    γ=0.99f0,
-    λ=0.95f0,
-    clip_range=0.2f0,
-    clip_range_vf = 0.2f0,
-    max_grad_norm=0.5f0,
-    n_microbatches=1,
-    actorbatch_size = 32,
-    n_epochs=10,
-    actor_loss_weight=1.0f0,
-    critic_loss_weight=0.5f0,
-    entropy_loss_weight=0.01f0,
-    critic_regularization_loss_weight=0.01f0,
-    logσ_regularization_loss_weight=0.01f0,
-    adaptive_weights = true,
-    dist=Normal,
-    rng=Random.GLOBAL_RNG,
-    clip1 = false,
-    normalize_advantage = false,
-    start_steps = -1,
-    start_policy = nothing,
-    target_kl = 100.0,
-    noise = nothing,
-    noise_sampler = nothing,
-    noise_scale = 90.0,
-    noise_step = 0,
-    fear_factor = 1.0f0,
-    fear_scale = 0.5f0,
-    new_loss = true,
-    mm = ModulationModule(),
-    critic_target = 0.0f0,
-)
-    PPOPolicy3{typeof(approximator),dist,typeof(rng)}(
-        approximator,
-        γ,
-        λ,
-        clip_range,
-        clip_range_vf,
-        max_grad_norm,
-        n_microbatches,
-        actorbatch_size,
-        n_epochs,
-        actor_loss_weight,
-        critic_loss_weight,
-        entropy_loss_weight,
-        critic_regularization_loss_weight,
-        logσ_regularization_loss_weight,
-        adaptive_weights,
-        rng,
-        n_random_start,
-        update_freq,
-        update_step,
-        clip1,
-        normalize_advantage,
-        start_steps,
-        start_policy,
-        target_kl,
-        noise,
-        noise_sampler,
-        noise_scale,
-        noise_step,
-        fear_factor,
-        fear_scale,
-        new_loss,
-        mm,
-        critic_target,
-        [0.0],
-        [0.0],
-        [0.0],
-    )
-end
+
 
 function prob(
     p::PPOPolicy3{<:ActorCritic2{<:GaussianNetwork},Normal},
