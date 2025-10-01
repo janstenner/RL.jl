@@ -14,6 +14,8 @@ Base.@kwdef mutable struct PPOPolicy3{A<:ActorCritic2,D,R} <: AbstractPolicy
     adaptive_weights::Bool = true
     rng::R = Random.GLOBAL_RNG
     update_freq::Int = 2048
+    critic_frozen_update_freq::Int = 4
+    actor_update_freq::Int = 1
     update_step::Int = 0
     clip1::Bool = false
     normalize_advantage::Bool = true
@@ -38,7 +40,8 @@ end
 
 
 
-function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=100, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 0.1, fear_scale = 0.4, new_loss = true, dist = Normal)
+function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=100, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 0.1, fear_scale = 0.4, new_loss = true, dist = Normal, critic_frozen_update_freq = 4,
+    actor_update_freq = 1,)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -97,6 +100,8 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
             adaptive_weights = adaptive_weights,
             rng = rng,
             update_freq = update_freq,
+            critic_frozen_update_freq = critic_frozen_update_freq,
+            actor_update_freq = actor_update_freq,
             clip1 = clip1,
             normalize_advantage = normalize_advantage,
             start_steps = start_steps,
@@ -762,7 +767,7 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
             end
             
             if !stop_update
-                if (p.update_step / p.update_freq) % 4 == 0
+                if (p.update_step / p.update_freq) % p.actor_update_freq == 0
                     Flux.update!(AC.actor_state_tree, AC.actor.μ, g_actor.μ)
                     Flux.update!(AC.sigma_state_tree, AC.actor.logσ, g_actor.logσ)
                 end
@@ -821,7 +826,7 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
 
     #println(p.update_step / p.update_freq)
 
-    if (p.update_step / p.update_freq) % 4 == 0
+    if (p.update_step / p.update_freq) % p.critic_frozen_update_freq == 0
         println("CRITIC FROZEN UPDATE")
         AC.critic_frozen = deepcopy(AC.critic)
         AC.critic2_frozen = deepcopy(AC.critic2)
