@@ -30,6 +30,7 @@ Base.@kwdef mutable struct PPOPolicy3{A<:ActorCritic2,D,R} <: AbstractPolicy
     fear_scale = 0.4f0
     new_loss::Bool = true
     mm = ModulationModule()
+    critic2_takes_action::Bool = true
     last_action_log_prob::Vector{Float32} = [0.0f0]
     last_sigma::Vector{Float32} = [0.0f0]
     last_mu::Vector{Float32} = [0.0f0]
@@ -40,8 +41,7 @@ end
 
 
 
-function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=100, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 0.1, fear_scale = 0.4, new_loss = true, dist = Normal, critic_frozen_update_freq = 4,
-    actor_update_freq = 1,)
+function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=100, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 0.1, fear_scale = 0.4, new_loss = true, dist = Normal, critic_frozen_update_freq = 4, actor_update_freq = 1, critic2_takes_action = true)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -64,7 +64,7 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
     critic = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic)
     critic_frozen = deepcopy(critic)
 
-    critic2 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic)
+    critic2 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic, is_critic2 = critic2_takes_action)
     critic2_frozen = deepcopy(critic2)
 
     approximator = isnothing(approximator) ? ActorCritic2(
@@ -114,6 +114,7 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
             fear_scale = fear_scale,
             new_loss = new_loss,
             mm = mm,
+            critic2_takes_action = critic2_takes_action,
         ),
         trajectory = 
         CircularArrayTrajectory(;
@@ -508,7 +509,7 @@ end
 
 
 
-function _update!(p::PPOPolicy3, t::Any; IL=false)
+function _update!(p::PPOPolicy3, t::Any)
     rng = p.rng
     AC = p.approximator
     γ = p.γ
@@ -545,10 +546,11 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
 
     # advantages = reshape(send_to_host( AC.critic2( vcat(flatten_batch(states), flatten_batch(actions)) )) , n_envs, :) - offsets
 
+    critic2_input = p.critic2_takes_action ? vcat(flatten_batch(states), flatten_batch(actions)) : flatten_batch(states)
 
-    critic2_values = reshape(send_to_host( AC.critic2( flatten_batch(states)) ) , n_envs, :)
+    critic2_values = reshape(send_to_host( AC.critic2( critic2_input ) ) , n_envs, :)
 
-    gae_deltas = t[:reward] .+ critic2_values .* (1 .- t[:terminal]) .- critic2_values
+    gae_deltas = t[:reward] .+ critic2_values .* (1 .- t[:terminal]) .- values
 
     #@show size(gae_deltas)
 
@@ -604,15 +606,15 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
     rewards = to_device(t[:reward])
     terminal = to_device(t[:terminal])
 
-    v_ref = AC.critic_frozen( to_device(flatten_batch(t[:state])) )[:] 
+    v_ref = AC.critic_frozen( flatten_batch(states) )[:] 
 
-    q_ref = AC.critic2_frozen( to_device(flatten_batch(t[:state])) )[:] 
+    q_ref = AC.critic2_frozen( critic2_input )[:] 
 
 
     next_values = reshape( AC.critic( next_states ), n_envs, :)
     targets = lambda_truncated_targets(rewards, terminal, next_values, γ)[:]
 
-    next_critic2_values = reshape( AC.critic2( next_states ), n_envs, :)
+    #next_critic2_values = reshape( AC.critic2( next_states ), n_envs, :)
     targets_critic2 = lambda_truncated_targets_ppo3(rewards, terminal, next_values, γ)[:]
 
     collector = BatchQuantileCollector()
@@ -729,15 +731,11 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
 
 
 
-                if IL
-                    critic_loss = 0.0
-                    # critic2_loss = 0.0
-                else
-                    bellman = mean(((tar .- values_pred) .^ 2))
-                    fr_term = mean((values_pred .- v_ref[inds]) .^ 2)
-                    critic_loss = bellman + 0.4 * fr_term # .* exp_m[:])
-                    # critic2_loss = mean(((nv .- nv′) .^ 2)) # .* exp_m[:])
-                end
+                
+                bellman = mean(((tar .- values_pred) .^ 2))
+                fr_term = mean((values_pred .- v_ref[inds]) .^ 2)
+                critic_loss = bellman + 0.4 * fr_term # .* exp_m[:])
+
 
                 loss = w₁ * actor_loss + w₂ * critic_loss - w₃ * entropy_loss #+ w₄ * critic_regularization #+ w₅ * logσ_regularization
 
@@ -790,8 +788,10 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
 
             old_v2 = vec(critic2_values)[inds]
 
+            critic2_input = p.critic2_takes_action ? vcat(s, a) : s
+
             g_critic2 = Flux.gradient(AC.critic2) do critic2
-                v2′ = critic2(s) |> vec
+                v2′ = critic2(critic2_input) |> vec
 
                 if isnothing(clip_range_vf) || clip_range_vf == 0.0
                     values_pred2 = v2′
@@ -801,13 +801,11 @@ function _update!(p::PPOPolicy3, t::Any; IL=false)
                     values_pred2 = old_v2 .+ clamp.(Δ, -clip_range_vf, clip_range_vf)
                 end
 
-                if IL
-                    critic2_loss = 0.0
-                else
-                    bellman = mean(((tar .- values_pred2) .^ 2))
-                    fr_term = mean((values_pred2 .- q_ref[inds]) .^ 2)
-                    critic2_loss = bellman + 0.4 * fr_term # .* exp_m[:]
-                end
+
+                bellman = mean(((tar .- values_pred2) .^ 2))
+                fr_term = mean((values_pred2 .- q_ref[inds]) .^ 2)
+                critic2_loss = bellman + 0.4 * fr_term # .* exp_m[:]
+
 
                 ignore() do
                     push!(critic2_losses, w₂ * critic2_loss)
