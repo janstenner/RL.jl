@@ -284,43 +284,68 @@ end
 
 
 
+
 function nstep_targets(
     rewards::Vector{Float32},
     dones::Vector{Bool},
     next_values::Vector{Float32},
-    γ::Float32=0.99f0;
-    n::Int=3
+    γ::Float32 = 0.99f0;
+    n::Int = 3
 ) :: Vector{Float32}
     T = length(rewards)
+    @assert length(dones) == T && length(next_values) == T
     targets = similar(rewards)
-    for t in 1:T
-        g = 0f0
-        discount = 1f0
-        hit_done = false
 
-        # k-Schritte von Belohnungen sammeln
+    @inbounds for t in 1:T
+        g::Float32 = 0f0
+        discount::Float32 = 1f0
+        hit_done = false
+        last_idx = t # wird im Loop auf den letzten wirklich verwendeten Index gesetzt
+
+        # bis zu n Rewards einsammeln (oder bis Episodenende/Sequenzende)
         for k in 0:(n-1)
             idx = t + k
             if idx > T
                 break
             end
             g += discount * rewards[idx]
-            if dones[idx]        # Episode endet hier
+            last_idx = idx
+            if dones[idx]                # Episode endet hier → kein Bootstrapping
                 hit_done = true
                 break
             end
-            discount *= γ
+            discount *= γ                # γ^(k+1)
         end
 
-        # Nur bootstrappen, wenn in den ersten n Schritten kein Done war
-        idxn = t + n - 1
-        if !hit_done && idxn ≤ T && !dones[idxn]
-            g += discount * next_values[idxn]
+        # Bootstrapping NUR wenn kein done getroffen wurde.
+        # Wichtig: mit dem tatsächlich letzten Index bootstrappen (last_idx),
+        # nicht blind mit t+n-1.
+        if !hit_done && last_idx ≥ t && last_idx ≤ T && !dones[last_idx]
+            # discount ist hier bereits γ^m mit m = Anzahl gesammelter Rewards
+            # next_values[last_idx] entspricht V(s_{last_idx+1})
+            g += discount * next_values[last_idx]
         end
 
         targets[t] = g
     end
     return targets
+end
+
+function nstep_targets(
+    rewards::AbstractMatrix,
+    dones::AbstractMatrix,
+    next_values::AbstractMatrix,
+    γ::Float32=0.99f0;
+    n::Int=3
+) :: AbstractMatrix
+
+    results = zeros(Float32, size(rewards))
+
+    for i in 1:size(rewards, 1)
+        results[i, :] = nstep_targets(rewards[i, :], dones[i, :], next_values[i, :], γ; n=n)
+    end
+
+    return results
 end
 
 
@@ -411,34 +436,41 @@ function nstep_targets_ppo3(
     rewards::Vector{Float32},
     dones::Vector{Bool},
     next_values::Vector{Float32},
-    γ::Float32=0.99f0;
-    n::Int=3
+    γ::Float32 = 0.99f0;
+    n::Int = 3
 ) :: Vector{Float32}
     T = length(rewards)
+    @assert length(dones) == T && length(next_values) == T
     targets = similar(rewards)
-    for t in 1:T
-        g = 0f0
-        discount = γ
-        hit_done = false
 
-        # k-Schritte von Belohnungen sammeln
+    @inbounds for t in 1:T
+        g::Float32 = 0f0
+        discount::Float32 = γ
+        hit_done = false
+        last_idx = t  # wird im Loop auf den letzten wirklich verwendeten Index gesetzt
+
+        # bis zu n Rewards einsammeln (oder bis Episodenende/Sequenzende)
         for k in 1:(n-1)
             idx = t + k
             if idx > T
                 break
             end
             g += discount * rewards[idx]
-            if dones[idx]        # Episode endet hier
+            last_idx = idx
+            if dones[idx]                # Episode endet hier → kein Bootstrapping
                 hit_done = true
                 break
             end
-            discount *= γ
+            discount *= γ                # γ^(k+1)
         end
 
-        # Nur bootstrappen, wenn in den ersten n Schritten kein Done war
-        idxn = t + n - 1
-        if !hit_done && idxn ≤ T && !dones[idxn]
-            g += discount * next_values[idxn]
+        # Bootstrapping NUR wenn kein done getroffen wurde.
+        # Wichtig: mit dem tatsächlich letzten Index bootstrappen (last_idx),
+        # nicht blind mit t+n-1.
+        if !hit_done && last_idx ≥ t && last_idx ≤ T && !dones[last_idx]
+            # discount ist hier bereits γ^m mit m = Anzahl gesammelter Rewards
+            # next_values[last_idx] entspricht V(s_{last_idx+1})
+            g += discount * next_values[last_idx]
         end
 
         targets[t] = g
@@ -506,6 +538,58 @@ function lambda_truncated_targets_ppo3(
     return results
 end
 
+function special_targets_ppo3(
+    rewards::Vector{Float32},
+    dones::Vector{Bool},
+    critic2_values::Vector{Float32},
+    next_values::Vector{Float32},
+    γ::Float32 = 0.99f0
+) :: Vector{Float32}
+    T = length(rewards)
+    @assert length(dones) == T && length(critic2_values) == T && length(next_values) == T
+    targets = similar(rewards)
+
+    @inbounds for t in 1:T
+        g::Float32 = 0f0
+        hit_done = false
+
+        if t+1 > T
+            g = critic2_values[t]
+        else
+            if dones[t]
+                hit_done = true
+            else
+                #g += γ * rewards[t + 1]
+                g += γ * next_values[t]
+            end
+            
+            # if !hit_done && !dones[t+1]
+            #     g += γ^2 * next_values[t+1]
+            # end
+        end
+
+        targets[t] = g
+    end
+    return targets
+end
+
+function special_targets_ppo3(
+    rewards::AbstractMatrix,
+    dones::AbstractMatrix,
+    critic2_values::AbstractMatrix,
+    next_values::AbstractMatrix,
+    γ::Float32=0.99f0
+) :: AbstractMatrix
+
+    results = zeros(Float32, size(rewards))
+
+    for i in 1:size(rewards, 1)
+        results[i, :] = special_targets_ppo3(rewards[i, :], dones[i, :], critic2_values[i, :], next_values[i, :], γ)
+    end
+
+    return results
+end
+
 
 
 
@@ -521,7 +605,7 @@ function _update!(p::PPOPolicy3, t::Any)
     w₁ = p.actor_loss_weight
     w₂ = p.critic_loss_weight
     w₃ = p.entropy_loss_weight
-    D = device(AC)
+    D = RL.device(AC)
     to_device(x) = send_to_device(D, x)
 
     n_envs, n_rollout = size(t[:terminal])
@@ -550,9 +634,14 @@ function _update!(p::PPOPolicy3, t::Any)
 
     critic2_values = reshape(send_to_host( AC.critic2( critic2_input ) ) , n_envs, :)
 
-    gae_deltas = t[:reward] .+ critic2_values .* (1 .- t[:terminal]) .- values
+    rewards = collect(to_device(t[:reward]))
+    terminal = collect(to_device(t[:terminal]))
+
+    gae_deltas = rewards .+ critic2_values .* (1 .- terminal) .- values
+    #gae_deltas = rewards .+ critic2_values .* (1 .- terminal)
 
     #@show size(gae_deltas)
+    #error("abb")
 
 
     advantages, returns = generalized_advantage_estimation(
@@ -603,8 +692,6 @@ function _update!(p::PPOPolicy3, t::Any)
 
 
     next_states = to_device(flatten_batch(t[:next_state]))
-    rewards = to_device(t[:reward])
-    terminal = to_device(t[:terminal])
 
     v_ref = AC.critic_frozen( flatten_batch(states) )[:] 
 
@@ -614,8 +701,8 @@ function _update!(p::PPOPolicy3, t::Any)
     next_values = reshape( AC.critic( next_states ), n_envs, :)
     targets = lambda_truncated_targets(rewards, terminal, next_values, γ)[:]
 
-    #next_critic2_values = reshape( AC.critic2( next_states ), n_envs, :)
-    targets_critic2 = lambda_truncated_targets_ppo3(rewards, terminal, next_values, γ)[:]
+    #targets for critic2 now below
+
 
     collector = BatchQuantileCollector()
     
@@ -776,8 +863,22 @@ function _update!(p::PPOPolicy3, t::Any)
 
             #update!(AC.critic.layers[end], tar) 
 
+        end
+    end
 
+    #critic2_input = p.critic2_takes_action ? vcat(next_states, AC.actor.μ(next_states)) : next_states
+    #next_critic2_values = reshape( AC.critic2( critic2_input ), n_envs, :)
+    #targets_critic2 = lambda_truncated_targets_ppo3(rewards, terminal, next_values, γ)[:]
+    next_values = reshape( AC.critic( next_states ), n_envs, :)
+    targets_critic2 = special_targets_ppo3(rewards, terminal, critic2_values, next_values, γ)[:]
 
+    for epoch in 1:n_epochs
+        for i in 1:n_microbatches
+
+            inds = rand_inds[(i-1)*microbatch_size+1:i*microbatch_size]
+
+            s = to_device(collect(select_last_dim(states_flatten_on_host, inds)))
+            a = to_device(collect(select_last_dim(actions_flatten, inds)))
 
             # nv′ = vec(next_values)[inds]
             # rew = vec(rewards)[inds]
