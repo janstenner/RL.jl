@@ -541,32 +541,29 @@ end
 function special_targets_ppo3(
     rewards::Vector{Float32},
     dones::Vector{Bool},
-    critic2_values::Vector{Float32},
+    values::Vector{Float32},
     next_values::Vector{Float32},
     γ::Float32 = 0.99f0
 ) :: Vector{Float32}
     T = length(rewards)
-    @assert length(dones) == T && length(critic2_values) == T && length(next_values) == T
+    @assert length(dones) == T && length(values) == T && length(next_values) == T
     targets = similar(rewards)
 
     @inbounds for t in 1:T
         g::Float32 = 0f0
         hit_done = false
 
-        if t+1 > T
-            g = critic2_values[t]
+        g += rewards[t]
+        
+        if dones[t]
+            hit_done = true
         else
-            if dones[t]
-                hit_done = true
-            else
-                #g += γ * rewards[t + 1]
-                g += γ * next_values[t]
-            end
-            
-            # if !hit_done && !dones[t+1]
-            #     g += γ^2 * next_values[t+1]
-            # end
+            #g += γ * rewards[t + 1]
+            g += γ * next_values[t]
         end
+        
+        g -= values[t]
+            
 
         targets[t] = g
     end
@@ -576,7 +573,7 @@ end
 function special_targets_ppo3(
     rewards::AbstractMatrix,
     dones::AbstractMatrix,
-    critic2_values::AbstractMatrix,
+    values::AbstractMatrix,
     next_values::AbstractMatrix,
     γ::Float32=0.99f0
 ) :: AbstractMatrix
@@ -584,7 +581,7 @@ function special_targets_ppo3(
     results = zeros(Float32, size(rewards))
 
     for i in 1:size(rewards, 1)
-        results[i, :] = special_targets_ppo3(rewards[i, :], dones[i, :], critic2_values[i, :], next_values[i, :], γ)
+        results[i, :] = special_targets_ppo3(rewards[i, :], dones[i, :], values[i, :], next_values[i, :], γ)
     end
 
     return results
@@ -637,8 +634,8 @@ function _update!(p::PPOPolicy3, t::Any)
     rewards = collect(to_device(t[:reward]))
     terminal = collect(to_device(t[:terminal]))
 
-    gae_deltas = rewards .+ critic2_values .* (1 .- terminal) .- values
-    #gae_deltas = rewards .+ critic2_values .* (1 .- terminal)
+    #gae_deltas = rewards .+ critic2_values .* (1 .- terminal) .- values
+    gae_deltas = critic2_values
 
     #@show size(gae_deltas)
     #error("abb")
@@ -707,15 +704,18 @@ function _update!(p::PPOPolicy3, t::Any)
     collector = BatchQuantileCollector()
     
 
-    rand_inds = shuffle!(rng, Vector(1:n_envs*n_rollout))
+    
 
     for epoch in 1:n_epochs
 
-        
+        rand_inds = shuffle!(rng, Vector(1:n_envs*n_rollout))
+        #rand_inds_actor = shuffle!(rng, Vector(1:n_envs*n_rollout-actorbatch_size))
+
         for i in 1:n_microbatches
 
             inds = rand_inds[(i-1)*microbatch_size+1:i*microbatch_size]
 
+            #inds_actor = collect(rand_inds_actor[i]:rand_inds_actor[i]+actorbatch_size-1)
             inds_actor = inds[1:clamp(actorbatch_size, 1, length(inds))]
 
             #inds = positive_advantage_indices
@@ -723,16 +723,17 @@ function _update!(p::PPOPolicy3, t::Any)
             # s = to_device(select_last_dim(states_flatten_on_host, inds))
             # !!! we need to convert it into a continuous CuArray otherwise CUDA.jl will complain scalar indexing
             s = to_device(collect(select_last_dim(states_flatten_on_host, inds)))
-            a = to_device(collect(select_last_dim(actions_flatten, inds)))
-            exp_m = to_device(collect(select_last_dim(explore_mod, inds)))
+            s_actor = to_device(collect(select_last_dim(states_flatten_on_host, inds_actor)))
+            a = to_device(collect(select_last_dim(actions_flatten, inds_actor)))
+            exp_m = to_device(collect(select_last_dim(explore_mod, inds_actor)))
 
             if eltype(a) === Int
                 a = CartesianIndex.(a, 1:length(a))
             end
 
             #r = vec(returns)[inds]
-            log_p = vec(action_log_probs)[inds]
-            adv = vec(advantages)[inds]
+            log_p = vec(action_log_probs)[inds_actor]
+            adv = vec(advantages)[inds_actor]
 
             tar = vec(targets)[inds]
 
@@ -754,7 +755,7 @@ function _update!(p::PPOPolicy3, t::Any)
                 # nv′ = AC.critic(ns) |> vec
                 # nv = critic2(vcat(s,a)) |> vec
 
-                μ, logσ = actor(s)
+                μ, logσ = actor(s_actor)
 
                 σ = (exp.(logσ) .* exp_m) #.+ (exp_m .* 0.25)
 
@@ -780,26 +781,12 @@ function _update!(p::PPOPolicy3, t::Any)
                 end
 
                 
-                #fear = (abs.((ratio .- 1)) + ones(size(ratio))).^1.3 .* p.fear_factor
                 fear = (ratio .- 1).^2 .* p.fear_factor
 
-                # if !(isempty(s_neg))
-                #     v_neg = critic(s_neg)
-                #     critic_regularization = mean((v_neg .- p.critic_target) .^ 2)
-                # else
-                #     critic_regularization = 0.0f0
-                # end
-
-                # if AC.actor.logσ_is_network
-                #     logσ_neg = AC.actor.logσ(s_neg)
-                #     logσ_regularization  = mean((logσ_neg .- log(AC.actor.max_σ)) .^ 2)	
-                # else
-                #     logσ_regularization  = 0.0f0
-                # end
 
                 if p.new_loss
                     actor_loss_values = ((ratio .* adv) - fear)  .* exp_m[:]
-                    actor_loss = -mean(actor_loss_values[inds_actor])
+                    actor_loss = -mean(actor_loss_values)
                 else
                     surr1 = ratio .* adv
                     surr2 = clamp.(ratio, 1.0f0 - clip_range, 1.0f0 + clip_range) .* adv
@@ -824,28 +811,15 @@ function _update!(p::PPOPolicy3, t::Any)
                 critic_loss = bellman + 0.4 * fr_term # .* exp_m[:])
 
 
-                loss = w₁ * actor_loss + w₂ * critic_loss - w₃ * entropy_loss #+ w₄ * critic_regularization #+ w₅ * logσ_regularization
+                loss = w₁ * actor_loss + w₂ * critic_loss - w₃ * entropy_loss 
 
 
                 ignore() do
-                    # println("---------------------")
-                    # println(critic_loss)
-                    # println(critic_regularization)
-                    # println("---------------------")
                     push!(actor_losses, w₁ * actor_loss)
                     push!(critic_losses, w₂ * critic_loss)
-                    #push!(critic2_losses, w₂ * critic2_loss)
                     push!(entropy_losses, -w₃ * entropy_loss)
-                    # push!(critic_regularization_losses, w₄ * critic_regularization)
-                    # push!(logσ_regularization_losses, w₅ * logσ_regularization)
-
-
-                    #println(maximum(abs.(ratio .- 1)))
 
                     update!(collector, ratio, adv; p=0.9, within_batch_weighted=true)
-
-                    # polyak update critic target
-                    # p.critic_target = p.critic_target * 0.9 + (maximum(r) - 0.1) * 0.1
                 end
 
                 loss
@@ -869,10 +843,14 @@ function _update!(p::PPOPolicy3, t::Any)
     #critic2_input = p.critic2_takes_action ? vcat(next_states, AC.actor.μ(next_states)) : next_states
     #next_critic2_values = reshape( AC.critic2( critic2_input ), n_envs, :)
     #targets_critic2 = lambda_truncated_targets_ppo3(rewards, terminal, next_values, γ)[:]
+    values = reshape( AC.critic( states ), n_envs, :)
     next_values = reshape( AC.critic( next_states ), n_envs, :)
-    targets_critic2 = special_targets_ppo3(rewards, terminal, critic2_values, next_values, γ)[:]
+    targets_critic2 = special_targets_ppo3(rewards, terminal, values, next_values, γ)[:]
 
     for epoch in 1:n_epochs
+
+        rand_inds = shuffle!(rng, Vector(1:n_envs*n_rollout))
+
         for i in 1:n_microbatches
 
             inds = rand_inds[(i-1)*microbatch_size+1:i*microbatch_size]
@@ -912,7 +890,9 @@ function _update!(p::PPOPolicy3, t::Any)
                     push!(critic2_losses, w₂ * critic2_loss)
                 end
 
-                critic2_loss
+                loss = w₂ * critic2_loss
+
+                loss
             end
 
             Flux.update!(AC.critic2_state_tree, AC.critic2, g_critic2[1])
