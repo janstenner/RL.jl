@@ -29,6 +29,8 @@ Base.@kwdef mutable struct PPOPolicy3{A<:ActorCritic2,D,R} <: AbstractPolicy
     fear_factor = 0.1f0
     fear_scale = 0.4f0
     new_loss::Bool = true
+    use_popart::Bool = false
+    critic_frozen_factor::Float32 = 0.1f0
     mm = ModulationModule()
     critic2_takes_action::Bool = true
     last_action_log_prob::Vector{Float32} = [0.0f0]
@@ -41,7 +43,7 @@ end
 
 
 
-function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=100, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 0.1, fear_scale = 0.4, new_loss = true, dist = Normal, critic_frozen_update_freq = 4, actor_update_freq = 1, critic2_takes_action = true)
+function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=100, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 0.1, fear_scale = 0.4, new_loss = true, dist = Normal, critic_frozen_update_freq = 4, actor_update_freq = 1, critic2_takes_action = true, use_popart = false, critic_frozen_factor = 0.1f0)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -61,10 +63,10 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
 
     mm = ModulationModule()
 
-    critic = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic)
+    critic = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic, popart = use_popart)
     critic_frozen = deepcopy(critic)
 
-    critic2 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic, is_critic2 = critic2_takes_action)
+    critic2 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic, is_critic2 = critic2_takes_action, popart = use_popart)
     critic2_frozen = deepcopy(critic2)
 
     approximator = isnothing(approximator) ? ActorCritic2(
@@ -78,10 +80,10 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
                 critic_frozen = critic_frozen,
                 critic2 = critic2,
                 critic2_frozen = critic2_frozen,
-                optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
-                optimizer_sigma = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
-                optimizer_critic = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate_critic, betas)),
-                optimizer_critic2 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate_critic, betas)),
+                optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas, 1e-4, 1e-8;)),
+                optimizer_sigma = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas, 1e-4, 1e-8;)),
+                optimizer_critic = Optimisers.AdamW(learning_rate_critic, betas, 1e-4, 1e-8;), #Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate_critic, betas)),
+                optimizer_critic2 = Optimisers.AdamW(learning_rate_critic, betas, 1e-4, 1e-8;), #Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate_critic, betas)),
             ) : approximator
 
     Agent(
@@ -113,6 +115,8 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
             fear_factor = fear_factor,
             fear_scale = fear_scale,
             new_loss = new_loss,
+            use_popart = use_popart,
+            critic_frozen_factor = critic_frozen_factor,
             mm = mm,
             critic2_takes_action = critic2_takes_action,
         ),
@@ -684,6 +688,9 @@ function _update!(p::PPOPolicy3, t::Any)
         AC.sigma_state_tree = Flux.setup(AC.optimizer_sigma, AC.actor.logσ)
         AC.critic_state_tree = Flux.setup(AC.optimizer_critic, AC.critic)
         AC.critic2_state_tree = Flux.setup(AC.optimizer_critic2, AC.critic2)
+
+        Optimisers.adjust!(AC.critic_state_tree.layers[end]; lambda = 0.0)
+        Optimisers.adjust!(AC.critic2_state_tree.layers[end]; lambda = 0.0)
     end
 
 
@@ -808,7 +815,7 @@ function _update!(p::PPOPolicy3, t::Any)
                 
                 bellman = mean(((tar .- values_pred) .^ 2))
                 fr_term = mean((values_pred .- v_ref[inds]) .^ 2)
-                critic_loss = bellman + 0.4 * fr_term # .* exp_m[:])
+                critic_loss = bellman + p.critic_frozen_factor * fr_term # .* exp_m[:])
 
 
                 loss = w₁ * actor_loss + w₂ * critic_loss - w₃ * entropy_loss 
@@ -835,7 +842,9 @@ function _update!(p::PPOPolicy3, t::Any)
                 break
             end
 
-            #update!(AC.critic.layers[end], tar) 
+            if p.use_popart
+                update!(AC.critic.layers[end], tar)
+            end
 
         end
     end
@@ -883,7 +892,7 @@ function _update!(p::PPOPolicy3, t::Any)
 
                 bellman = mean(((tar .- values_pred2) .^ 2))
                 fr_term = mean((values_pred2 .- q_ref[inds]) .^ 2)
-                critic2_loss = bellman + 0.4 * fr_term # .* exp_m[:]
+                critic2_loss = bellman + p.critic_frozen_factor * fr_term # .* exp_m[:]
 
 
                 ignore() do
@@ -897,7 +906,9 @@ function _update!(p::PPOPolicy3, t::Any)
 
             Flux.update!(AC.critic2_state_tree, AC.critic2, g_critic2[1])
 
-            #update!(AC.critic2.layers[end], tar) 
+            if p.use_popart
+                update!(AC.critic2.layers[end], tar) 
+            end
 
         end
     end
