@@ -636,10 +636,13 @@ function td_lambda_targets_ppo3(
     Gλ = 0f0
     for t in T:-1:1
         # für Schritt t ist next_values[t] = V(s_{t+1})
-        Gλ = rewards[t] + γ * ((1f0-λ)*next_values[t] + λ*Gλ) * (1 - dones[t]) - values[t]
-        #Gλ = γ * ((1f0-λ)*next_values[t] + λ*Gλ) * (1 - dones[t])
+        #Gλ = rewards[t] + γ * ((1f0-λ)*next_values[t] + λ*Gλ) * (1 - dones[t]) - values[t]
+
+        Gλ = ((1f0-λ)*next_values[t] + λ*Gλ) * (1 - dones[t])
         targets[t] = Gλ
-        #Gλ += rewards[t]
+
+        Gλ *= γ
+        Gλ += rewards[t]
     end
     return targets
 end
@@ -714,30 +717,30 @@ function _update!(p::PPOPolicy3, t::Any)
     terminal = collect(to_device(t[:terminal]))
 
     #gae_deltas = rewards .+ critic2_values .* (1 .- terminal) .- values
-    gae_deltas = critic2_values #- offsets
+    #gae_deltas = critic2_values #- offsets
 
     #@show size(gae_deltas)
     #error("abb")
 
 
-    advantages, returns = generalized_advantage_estimation(
-        gae_deltas,
-        zeros(Float32, size(gae_deltas)),
-        zeros(Float32, size(gae_deltas)),
-        γ,
-        λ;
-        dims=2,
-        terminal=t[:terminal]
-    )
     # advantages, returns = generalized_advantage_estimation(
-    #     rewards,
-    #     values,
-    #     critic2_values,
+    #     gae_deltas,
+    #     zeros(Float32, size(gae_deltas)),
+    #     zeros(Float32, size(gae_deltas)),
     #     γ,
     #     λ;
     #     dims=2,
-    #     terminal=t[:terminal]
+    #     terminal=terminal
     # )
+    advantages, returns = generalized_advantage_estimation(
+        rewards,
+        values,
+        critic2_values,
+        γ,
+        λ;
+        dims=2,
+        terminal=terminal
+    )
 
     # returns = to_device(advantages .+ select_last_dim(values, 1:n_rollout))
     advantages = to_device(advantages)
