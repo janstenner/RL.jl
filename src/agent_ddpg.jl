@@ -160,19 +160,19 @@ Base.@kwdef mutable struct CustomDDPGPolicy{
 end
 
 
-Flux.functor(x::CustomDDPGPolicy) = (
-    ba = x.behavior_actor,
-    bc = x.behavior_critic,
-    ta = x.target_actor,
-    tc = x.target_critic,
-),
-y -> begin
-    x = @set x.behavior_actor = y.ba
-    x = @set x.behavior_critic = y.bc
-    x = @set x.target_actor = y.ta
-    x = @set x.target_critic = y.tc
-    x
-end
+# Flux.functor(x::CustomDDPGPolicy) = (
+#     ba = x.behavior_actor,
+#     bc = x.behavior_critic,
+#     ta = x.target_actor,
+#     tc = x.target_critic,
+# ),
+# y -> begin
+#     x = @set x.behavior_actor = y.ba
+#     x = @set x.behavior_critic = y.bc
+#     x = @set x.target_actor = y.ta
+#     x = @set x.target_critic = y.tc
+#     x
+# end
 
 
 function (policy::CustomDDPGPolicy)(env; learning = true, test = false)

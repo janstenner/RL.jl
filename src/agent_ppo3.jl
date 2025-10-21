@@ -1,5 +1,5 @@
 
-Base.@kwdef mutable struct PPOPolicy3{A<:ActorCritic2,D,R} <: AbstractPolicy
+Base.@kwdef mutable struct PPOPolicy3{A,D,R} <: AbstractPolicy
     approximator::A
     γ::Float32 = 0.99f0
     λ::Float32 = 0.99f0
@@ -43,6 +43,30 @@ end
 
 
 
+Base.@kwdef mutable struct ActorCritic3{A,C,C2}
+    actor::A
+    critic::C # value function approximator
+    critic_frozen::C
+    critic2::C2 # action value function approximator minus r
+    critic2_frozen::C2
+    critic3 = nothing
+    optimizer_actor = ADAM()
+    optimizer_sigma = ADAM()
+    optimizer_critic = ADAM()
+    optimizer_critic2 = ADAM()
+    optimizer_critic3 = ADAM()
+    actor_state_tree = nothing
+    sigma_state_tree = nothing
+    critic_state_tree = nothing
+    critic2_state_tree = nothing
+    critic3_state_tree = nothing
+end
+
+@forward ActorCritic3.critic device
+
+
+
+
 # Pre-activation residual block: LN -> GELU -> Dense -> GELU -> Dense + skip
 struct ResMLPBlock
     ln1::LayerNorm
@@ -58,7 +82,7 @@ ResMLPBlock(width::Int) = ResMLPBlock(
 
 
 
-function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=100, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 0.1, fear_scale = 0.4, new_loss = true, dist = Normal, critic_frozen_update_freq = 4, actor_update_freq = 1, critic2_takes_action = true, use_popart = false, critic_frozen_factor = 0.1f0, λ_targets = 0.7f0, n_targets = 100,)
+function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=100, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 0.1, fear_scale = 0.4, new_loss = true, dist = Normal, critic_frozen_update_freq = 4, actor_update_freq = 1, critic2_takes_action = true, use_popart = false, critic_frozen_factor = 0.1f0, λ_targets = 0.7f0, n_targets = 100, use_critic3 = false,)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -99,7 +123,13 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
     # )
     critic2_frozen = deepcopy(critic2)
 
-    approximator = isnothing(approximator) ? ActorCritic2(
+    if use_critic3
+        critic3 = deepcopy(critic2)
+    else
+        critic3 = nothing
+    end
+
+    approximator = isnothing(approximator) ? ActorCritic3(
                 actor = GaussianNetwork(
                     μ = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = tanh_end),
                     logσ = create_logσ(logσ_is_network = logσ_is_network, ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, start_logσ = start_logσ),
@@ -110,10 +140,12 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
                 critic_frozen = critic_frozen,
                 critic2 = critic2,
                 critic2_frozen = critic2_frozen,
+                critic3 = critic3,
                 optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas, 1e-4, 1e-8;)),
                 optimizer_sigma = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas, 1e-4, 1e-8;)),
                 optimizer_critic = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate_critic, betas, 1e-4, 1e-8;)),
                 optimizer_critic2 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate_critic, betas, 1e-4, 1e-8;)),
+                optimizer_critic3 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate_critic, betas, 1e-4, 1e-8;)),
             ) : approximator
 
     Agent(
@@ -174,7 +206,7 @@ end
 
 
 function prob(
-    p::PPOPolicy3{<:ActorCritic2{<:GaussianNetwork},Normal},
+    p::PPOPolicy3{<:ActorCritic3{<:GaussianNetwork},Normal},
     state::AbstractArray,
     mask,
 )
@@ -183,7 +215,7 @@ function prob(
     StructArray{Normal}((μ, exp.(logσ)))
 end
 
-function prob(p::PPOPolicy3{<:ActorCritic2,Categorical}, state::AbstractArray, mask)
+function prob(p::PPOPolicy3{<:ActorCritic3,Categorical}, state::AbstractArray, mask)
     logits = p.approximator.actor(send_to_device(device(p.approximator), state))
     if !isnothing(mask)
         logits .+= ifelse.(mask, 0.0f0, typemin(Float32))
@@ -668,7 +700,9 @@ end
 
 
 
-function _update!(p::PPOPolicy3, t::Any)
+function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = true, time_step_interval = nothing, microbatch_size = nothing)
+
+
     rng = p.rng
     AC = p.approximator
     γ = p.γ
@@ -684,9 +718,28 @@ function _update!(p::PPOPolicy3, t::Any)
     to_device(x) = send_to_device(D, x)
 
     n_envs, n_rollout = size(t[:terminal])
-    
-    microbatch_size = Int(floor(n_envs * n_rollout ÷ n_microbatches))
+
+
+    if isnothing(time_step_interval)
+        global valid_indices = collect(1:n_envs * n_rollout)
+    else
+        # Get indices where time steps fall within the interval
+        time_steps = t[:state][end, 1, :]
+        global valid_indices = findall(x -> time_step_interval[1] <= x <= time_step_interval[2], time_steps)
+    end
+
+    n_samples = length(valid_indices)
+
+
+    if isnothing(microbatch_size)
+        microbatch_size = Int(floor(n_samples ÷ n_microbatches))
+    else
+        microbatch_size = min(microbatch_size, n_samples)
+        n_microbatches = Int(floor(n_samples ÷ microbatch_size))
+    end
+
     actorbatch_size = p.actorbatch_size
+
 
     n = length(t)
     states = to_device(t[:state])
@@ -716,34 +769,52 @@ function _update!(p::PPOPolicy3, t::Any)
     rewards = collect(to_device(t[:reward]))
     terminal = collect(to_device(t[:terminal]))
 
-    #gae_deltas = rewards .+ critic2_values .* (1 .- terminal) .- values
-    #gae_deltas = critic2_values #- offsets
 
-    #@show size(gae_deltas)
-    #error("abb")
+    if !isnothing(AC.critic3)
+        critic3_values = reshape(send_to_host( AC.critic3( critic2_input ) ) , n_envs, :)
+
+        gae_deltas = critic3_values
+
+        advantages, returns = generalized_advantage_estimation(
+            gae_deltas,
+            zeros(Float32, size(gae_deltas)),
+            zeros(Float32, size(gae_deltas)),
+            γ,
+            λ;
+            dims=2,
+            terminal=terminal
+        )
+    else
+
+        #gae_deltas = rewards .+ critic2_values .* (1 .- terminal) .- values
+        #gae_deltas = critic2_values #- offsets
+
+        #@show size(gae_deltas)
+        #error("abb")
 
 
-    # advantages, returns = generalized_advantage_estimation(
-    #     gae_deltas,
-    #     zeros(Float32, size(gae_deltas)),
-    #     zeros(Float32, size(gae_deltas)),
-    #     γ,
-    #     λ;
-    #     dims=2,
-    #     terminal=terminal
-    # )
-    advantages, returns = generalized_advantage_estimation(
-        rewards,
-        values,
-        critic2_values,
-        γ,
-        λ;
-        dims=2,
-        terminal=terminal
-    )
+        # advantages, returns = generalized_advantage_estimation(
+        #     gae_deltas,
+        #     zeros(Float32, size(gae_deltas)),
+        #     zeros(Float32, size(gae_deltas)),
+        #     γ,
+        #     λ;
+        #     dims=2,
+        #     terminal=terminal
+        # )
+        advantages, returns = generalized_advantage_estimation(
+            rewards,
+            values,
+            critic2_values,
+            γ,
+            λ;
+            dims=2,
+            terminal=terminal
+        )
 
-    # returns = to_device(advantages .+ select_last_dim(values, 1:n_rollout))
-    advantages = to_device(advantages)
+        # returns = to_device(advantages .+ select_last_dim(values, 1:n_rollout))
+        advantages = to_device(advantages)
+    end
 
     # if p.normalize_advantage
     #     advantages = (advantages .- mean(advantages)) ./ clamp(std(advantages), 1e-8, 1000.0)
@@ -778,6 +849,11 @@ function _update!(p::PPOPolicy3, t::Any)
 
         Optimisers.adjust!(AC.critic_state_tree.layers[end]; lambda = 0.0)
         Optimisers.adjust!(AC.critic2_state_tree.layers[end]; lambda = 0.0)
+
+        if !isnothing(AC.critic3)
+            AC.critic3_state_tree = Flux.setup(AC.optimizer_critic3, AC.critic3)
+            Optimisers.adjust!(AC.critic3_state_tree.layers[end]; lambda = 0.0)
+        end
     end
 
 
@@ -808,7 +884,7 @@ function _update!(p::PPOPolicy3, t::Any)
 
     for epoch in 1:n_epochs
 
-        rand_inds = shuffle!(rng, Vector(1:n_envs*n_rollout))
+        rand_inds = shuffle!(rng, valid_indices)
         #rand_inds_actor = shuffle!(rng, Vector(1:n_envs*n_rollout-actorbatch_size))
 
         for i in 1:n_microbatches
@@ -885,7 +961,7 @@ function _update!(p::PPOPolicy3, t::Any)
 
 
                 if p.new_loss
-                    actor_loss_values = ((ratio .* adv) - fear)  .* exp_m[:]
+                    actor_loss_values = ((ratio .* adv) - fear)  #.* exp_m[:]
                     actor_loss = -mean(actor_loss_values)
                 else
                     surr1 = ratio .* adv
@@ -927,15 +1003,19 @@ function _update!(p::PPOPolicy3, t::Any)
             
             if !stop_update
                 if (p.update_step / p.update_freq) % p.actor_update_freq == 0
-                    Flux.update!(AC.actor_state_tree, AC.actor.μ, g_actor.μ)
-                    Flux.update!(AC.sigma_state_tree, AC.actor.logσ, g_actor.logσ)
+                    if update_actor
+                        Flux.update!(AC.actor_state_tree, AC.actor.μ, g_actor.μ)
+                        Flux.update!(AC.sigma_state_tree, AC.actor.logσ, g_actor.logσ)
+                    end
                 end
-                Flux.update!(AC.critic_state_tree, AC.critic, g_critic)
+                if update_critic
+                    Flux.update!(AC.critic_state_tree, AC.critic, g_critic)
+                end
             else
                 break
             end
 
-            if p.use_popart
+            if p.use_popart && update_critic
                 update!(AC.critic.layers[end], tar)
             end
 
@@ -948,11 +1028,14 @@ function _update!(p::PPOPolicy3, t::Any)
     values = reshape( AC.critic( states ), n_envs, :)
     next_values = reshape( AC.critic( next_states ), n_envs, :)
     #targets_critic2 = special_targets_ppo3(rewards, terminal, values, next_values, γ)[:]
+    #@show size(rewards), size(terminal), size(values), size(next_values)
     targets_critic2 = td_lambda_targets_ppo3(rewards, terminal, values, next_values, γ; λ = p.λ_targets)[:]
+
+    targets_critic2 = next_values[:]
 
     for epoch in 1:n_epochs
 
-        rand_inds = shuffle!(rng, Vector(1:n_envs*n_rollout))
+        rand_inds = shuffle!(rng, valid_indices)
 
         for i in 1:n_microbatches
 
@@ -998,12 +1081,66 @@ function _update!(p::PPOPolicy3, t::Any)
                 loss
             end
 
-            Flux.update!(AC.critic2_state_tree, AC.critic2, g_critic2[1])
+            if update_critic
+                Flux.update!(AC.critic2_state_tree, AC.critic2, g_critic2[1])
 
-            if p.use_popart
-                update!(AC.critic2.layers[end], tar) 
+                if p.use_popart
+                    update!(AC.critic2.layers[end], tar) 
+                end
             end
 
+        end
+    end
+
+
+    if !isnothing(AC.critic3)
+        critic2_input = p.critic2_takes_action ? vcat(states, actions) : states
+        critic2_values = reshape( AC.critic2( critic2_input ), n_envs, :)
+
+        targets_critic3 = rewards + γ * critic2_values .* (1 .- terminal) - values
+
+        for epoch in 1:n_epochs
+
+            rand_inds = shuffle!(rng, Vector(1:n_envs*n_rollout))
+
+            for i in 1:n_microbatches
+
+                inds = rand_inds[(i-1)*microbatch_size+1:i*microbatch_size]
+
+                s = to_device(collect(select_last_dim(states_flatten_on_host, inds)))
+                a = to_device(collect(select_last_dim(actions_flatten, inds)))
+
+                # nv′ = vec(next_values)[inds]
+                # rew = vec(rewards)[inds]
+                # ter = vec(terminal)[inds]
+
+                #tar = rew + γ * nv′ .* (1 .- ter)
+                tar = vec(targets_critic3)[inds]
+
+                critic3_input = p.critic2_takes_action ? vcat(s, a) : s
+
+                g_critic3 = Flux.gradient(AC.critic3) do critic3
+                    v3′ = critic3(critic3_input) |> vec
+
+                    values_pred3 = v3′
+
+                    bellman = mean(((tar .- values_pred3) .^ 2))
+                    critic3_loss = bellman
+
+                    loss = w₂ * critic3_loss
+
+                    loss
+                end
+
+                if update_critic
+                    Flux.update!(AC.critic3_state_tree, AC.critic3, g_critic3[1])
+
+                    if p.use_popart
+                        update!(AC.critic3.layers[end], tar)
+                    end
+                end
+
+            end
         end
     end
 
@@ -1011,9 +1148,11 @@ function _update!(p::PPOPolicy3, t::Any)
     #println(p.update_step / p.update_freq)
 
     if (p.update_step / p.update_freq) % p.critic_frozen_update_freq == 0
-        println("CRITIC FROZEN UPDATE")
-        AC.critic_frozen = deepcopy(AC.critic)
-        AC.critic2_frozen = deepcopy(AC.critic2)
+        if update_critic
+            println("CRITIC FROZEN UPDATE")
+            AC.critic_frozen = deepcopy(AC.critic)
+            AC.critic2_frozen = deepcopy(AC.critic2)
+        end
     end
 
 

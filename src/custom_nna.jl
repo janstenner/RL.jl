@@ -95,7 +95,7 @@ end
 
 GaussianNetwork(pre, μ, logσ, min_σ=0.0f0, max_σ=Inf32, normalizer=tanh) = GaussianNetwork(pre, μ, logσ, min_σ, max_σ, normalizer)
 
-Flux.@functor GaussianNetwork
+Flux.@layer GaussianNetwork
 
 
 """

@@ -21,8 +21,8 @@ end
 
 
 function (mm::ModulationModule)()
-    mm.last = 1.0f0
-    return mm.last
+    # mm.last = 1.0f0
+    # return mm.last
 
     if mm.state == :idle
         # In idle mode, output zero
@@ -68,7 +68,7 @@ end
 # Functor‑Definition: damit Flux.params und gradient() wissen, welche Felder
 # sie traversieren sollen. μ und σ werden hier nicht als trainierbar markiert!
 # ────────────────────────────────────────────────────────────────────────────
-Flux.@functor PopArt
+Flux.@layer PopArt
 
 # Wir überschreiben, welche Felder wirklich trainiert werden:
 Flux.trainable(p::PopArt) = (; dense = p.dense)

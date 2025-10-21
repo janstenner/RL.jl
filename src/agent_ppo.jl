@@ -432,11 +432,6 @@ end
 
 
 
-function grad_l2_norm_tree(∇tree)
-    arrs = (leaf for leaf in Functors.fleaves(∇tree) if leaf isa AbstractArray)
-    return sqrt(sum(sum(abs2, A) for A in arrs))
-end
-
 
 
 function _update!(p::PPOPolicy, t::Any)
@@ -593,10 +588,7 @@ function _update!(p::PPOPolicy, t::Any)
                 Flux.update!(AC.actor_state_tree, AC.actor, g_actor)
                 Flux.update!(AC.critic_state_tree, AC.critic, g_critic)
 
-                # println("...............")
-                # println(grad_l2_norm_tree(g_actor))
-                # println(grad_l2_norm_tree(g_critic))
-                # println("...............")
+
             else
                 break
             end

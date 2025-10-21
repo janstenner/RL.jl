@@ -12,7 +12,6 @@ using StructArrays
 using UnicodePlots:lineplot
 using Flux
 using Optimisers
-using Functors
 using CUDA
 using Adapt
 using Random
@@ -24,9 +23,6 @@ using ProgressMeter
 using StableRNGs
 using Setfield: @set
 using Zygote
-using cuDNN
-using Transformers
-using Transformers.Layers
 using ChainRulesCore
 using Static
 using CoherentNoise
@@ -65,8 +61,8 @@ include("./agent_ppo.jl")
 include("./agent_ppo2.jl")
 include("./agent_ppo3.jl")
 include("./agent_sac.jl")
-include("./agent_mat.jl")
-include("./agent_matmix.jl")
+#include("./agent_mat.jl")
+#include("./agent_matmix.jl")
 
 
 
