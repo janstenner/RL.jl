@@ -35,6 +35,8 @@ Base.@kwdef mutable struct PPOPolicy3{A,D,R} <: AbstractPolicy
     n_targets = 100
     mm = ModulationModule()
     critic2_takes_action::Bool = true
+    use_exploration_module::Bool = false
+    use_whole_delta_targets::Bool = false
     last_action_log_prob::Vector{Float32} = [0.0f0]
     last_sigma::Vector{Float32} = [0.0f0]
     last_mu::Vector{Float32} = [0.0f0]
@@ -82,7 +84,7 @@ ResMLPBlock(width::Int) = ResMLPBlock(
 
 
 
-function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=100, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 0.1, fear_scale = 0.4, new_loss = true, dist = Normal, critic_frozen_update_freq = 4, actor_update_freq = 1, critic2_takes_action = true, use_popart = false, critic_frozen_factor = 0.1f0, λ_targets = 0.7f0, n_targets = 100, use_critic3 = false,)
+function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=100, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 0.1, fear_scale = 0.4, new_loss = true, dist = Normal, critic_frozen_update_freq = 4, actor_update_freq = 1, critic2_takes_action = true, use_popart = false, critic_frozen_factor = 0.1f0, λ_targets = 0.7f0, n_targets = 100, use_critic3 = false, use_exploration_module = false, use_whole_delta_targets = false, )
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -98,6 +100,10 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
         noise_sampler = perlin_2d(; seed=Int(floor(rand(rng) * 1e12)))
     else
         noise_sampler = nothing
+    end
+
+    if use_whole_delta_targets
+        critic2_takes_action = true
     end
 
     mm = ModulationModule()
@@ -124,7 +130,8 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
     critic2_frozen = deepcopy(critic2)
 
     if use_critic3
-        critic3 = deepcopy(critic2)
+        #critic3 is now baseline
+        critic3 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic, is_critic2 = false, popart = use_popart)
     else
         critic3 = nothing
     end
@@ -183,6 +190,8 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
             n_targets = n_targets,
             mm = mm,
             critic2_takes_action = critic2_takes_action,
+            use_exploration_module = use_exploration_module,
+            use_whole_delta_targets = use_whole_delta_targets,
         ),
         trajectory = 
         CircularArrayTrajectory(;
@@ -254,7 +263,9 @@ function (p::PPOPolicy3)(env::AbstractEnv)
     else
         dist = prob(p, env)
 
-        modulation_value = p.mm()
+        modulation_value = p.mm(p.use_exploration_module)
+
+
         dist.σ .*= modulation_value
         #dist.σ .+= modulation_value * 0.25
 
@@ -770,10 +781,20 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
     terminal = collect(to_device(t[:terminal]))
 
 
-    if !isnothing(AC.critic3)
-        critic3_values = reshape(send_to_host( AC.critic3( critic2_input ) ) , n_envs, :)
+    
 
-        gae_deltas = critic3_values
+    if p.use_whole_delta_targets
+        #gae_deltas = rewards .+ critic2_values .* (1 .- terminal) .- values
+
+        if !isnothing(AC.critic3)
+
+            offset_input = flatten_batch(states)
+            offsets = reshape(send_to_host( AC.critic3( offset_input )) , n_envs, :)
+
+            gae_deltas = critic2_values - offsets
+        else
+            gae_deltas = critic2_values #- offsets
+        end
 
         advantages, returns = generalized_advantage_estimation(
             gae_deltas,
@@ -785,23 +806,6 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
             terminal=terminal
         )
     else
-
-        #gae_deltas = rewards .+ critic2_values .* (1 .- terminal) .- values
-        #gae_deltas = critic2_values #- offsets
-
-        #@show size(gae_deltas)
-        #error("abb")
-
-
-        # advantages, returns = generalized_advantage_estimation(
-        #     gae_deltas,
-        #     zeros(Float32, size(gae_deltas)),
-        #     zeros(Float32, size(gae_deltas)),
-        #     γ,
-        #     λ;
-        #     dims=2,
-        #     terminal=terminal
-        # )
         advantages, returns = generalized_advantage_estimation(
             rewards,
             values,
@@ -811,10 +815,10 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
             dims=2,
             terminal=terminal
         )
-
-        # returns = to_device(advantages .+ select_last_dim(values, 1:n_rollout))
-        advantages = to_device(advantages)
     end
+
+    # returns = to_device(advantages .+ select_last_dim(values, 1:n_rollout))
+    advantages = to_device(advantages)
 
     # if p.normalize_advantage
     #     advantages = (advantages .- mean(advantages)) ./ clamp(std(advantages), 1e-8, 1000.0)
@@ -1029,9 +1033,17 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
     next_values = reshape( AC.critic( next_states ), n_envs, :)
     #targets_critic2 = special_targets_ppo3(rewards, terminal, values, next_values, γ)[:]
     #@show size(rewards), size(terminal), size(values), size(next_values)
-    targets_critic2 = td_lambda_targets_ppo3(rewards, terminal, values, next_values, γ; λ = p.λ_targets)[:]
 
-    targets_critic2 = next_values[:]
+
+
+    if p.use_whole_delta_targets
+        #@show size(rewards), size(terminal), size(values), size(next_values)
+        targets_critic2 = rewards + next_values .* γ .* (1 .- terminal) - values
+    else
+        #targets_critic2 = td_lambda_targets_ppo3(rewards, terminal, values, next_values, γ; λ = p.λ_targets)[:]
+        targets_critic2 = next_values .* (1 .- terminal)
+    end
+        
 
     for epoch in 1:n_epochs
 
@@ -1094,10 +1106,26 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
 
 
     if !isnothing(AC.critic3)
-        critic2_input = p.critic2_takes_action ? vcat(states, actions) : states
-        critic2_values = reshape( AC.critic2( critic2_input ), n_envs, :)
+        # critic2_input = p.critic2_takes_action ? vcat(states, actions) : states
+        # critic2_values = reshape( AC.critic2( critic2_input ), n_envs, :)
 
-        targets_critic3 = rewards + γ * critic2_values .* (1 .- terminal) - values
+        K    = 8 #p.baseline_mc_samples   # z.B. 4 oder 8
+        μ, ℓσ   = AC.actor(states_flatten_on_host)
+
+        #μ2, ℓσ2   = AC.actor(states)
+
+        #@show size(μ), size(ℓσ), size(μ2), size(ℓσ2)
+
+        acc  = zeros(Float32, size(μ))  # [act_dim, batch]
+        for k in 1:K
+            ϵ   = randn(Float32, size(μ))
+            a_k = μ .+ exp.(ℓσ) .* ϵ
+            acc .+= send_to_host(AC.critic2(vcat(flatten_batch(states), a_k)))
+        end
+        mean_c2 = acc ./ K                                   # ≈ E_a C2(s,a)
+        targets_critic3 = reshape(mean_c2, n_envs, :) .* (1 .- terminal)
+
+        #targets_critic3 = rewards + γ * critic2_values .* (1 .- terminal) - values
 
         for epoch in 1:n_epochs
 
@@ -1117,7 +1145,7 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
                 #tar = rew + γ * nv′ .* (1 .- ter)
                 tar = vec(targets_critic3)[inds]
 
-                critic3_input = p.critic2_takes_action ? vcat(s, a) : s
+                critic3_input = s
 
                 g_critic3 = Flux.gradient(AC.critic3) do critic3
                     v3′ = critic3(critic3_input) |> vec

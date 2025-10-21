@@ -20,31 +20,33 @@ Base.@kwdef mutable struct ModulationModule
 end
 
 
-function (mm::ModulationModule)()
-    # mm.last = 1.0f0
-    # return mm.last
+function (mm::ModulationModule)(use_exploration_module = true)
+    
+    if use_exploration_module
+        if mm.state == :idle
+            # In idle mode, output zero
+            mm.last = mm.min_value
+            # Possibly switch to explore
+            if rand() < mm.p_explore
+                mm.state  = :explore
+                mm.width  = rand(mm.min_width:mm.max_width)
+                mm.amp    = mm.min_amp + rand() * (mm.max_amp - mm.min_amp)
+                mm.sigma  = mm.width / 6
+                mm.center = mm.width / 2
+                mm.t      = 0
+            end
 
-    if mm.state == :idle
-        # In idle mode, output zero
-        mm.last = mm.min_value
-        # Possibly switch to explore
-        if rand() < mm.p_explore
-            mm.state  = :explore
-            mm.width  = rand(mm.min_width:mm.max_width)
-            mm.amp    = mm.min_amp + rand() * (mm.max_amp - mm.min_amp)
-            mm.sigma  = mm.width / 6
-            mm.center = mm.width / 2
-            mm.t      = 0
+        elseif mm.state == :explore
+            # Compute Gaussian-shaped output
+            mm.last = mm.min_value + mm.amp * exp(-((mm.t - mm.center)^2) / (2 * mm.sigma^2))
+            mm.t += 1
+            # Return to idle after the burst completes
+            if mm.t > mm.width
+                mm.state = :idle
+            end
         end
-
-    elseif mm.state == :explore
-        # Compute Gaussian-shaped output
-        mm.last = mm.min_value + mm.amp * exp(-((mm.t - mm.center)^2) / (2 * mm.sigma^2))
-        mm.t += 1
-        # Return to idle after the burst completes
-        if mm.t > mm.width
-            mm.state = :idle
-        end
+    else
+        mm.last = 1.0f0
     end
 
     return mm.last
@@ -158,7 +160,7 @@ function create_critic_PPO2(;ns, na, use_gpu, init, nna_scale, drop_middle_layer
 end
 
 
-function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=100, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, critic_regularization_loss_weight=0.01f0, logσ_regularization_loss_weight=0.01f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 1.0, fear_scale = 0.5, new_loss = true)
+function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=100, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, critic_regularization_loss_weight=0.01f0, logσ_regularization_loss_weight=0.01f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 1.0, fear_scale = 0.5, new_loss = true, use_exploration_module = false, )
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -231,6 +233,7 @@ function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, updat
             fear_scale = fear_scale,
             new_loss = new_loss,
             mm = mm,
+            use_exploration_module = use_exploration_module,
         ),
         trajectory = 
         CircularArrayTrajectory(;
@@ -308,6 +311,7 @@ mutable struct PPOPolicy2{A<:ActorCritic2,D,R} <: AbstractPolicy
     fear_factor
     fear_scale
     new_loss::Bool
+    use_exploration_module::Bool
     mm
     critic_target
     last_action_log_prob::Vector{Float32}
@@ -349,6 +353,7 @@ function PPOPolicy2(;
     fear_scale = 0.5f0,
     new_loss = true,
     mm = ModulationModule(),
+    use_exploration_module = false,
     critic_target = 0.0f0,
 )
     PPOPolicy2{typeof(approximator),dist,typeof(rng)}(
@@ -383,6 +388,7 @@ function PPOPolicy2(;
         fear_factor,
         fear_scale,
         new_loss,
+        use_exploration_module = use_exploration_module,
         mm,
         critic_target,
         [0.0],
