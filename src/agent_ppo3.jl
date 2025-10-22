@@ -38,6 +38,7 @@ Base.@kwdef mutable struct PPOPolicy3{A,D,R} <: AbstractPolicy
     use_exploration_module::Bool = false
     use_whole_delta_targets::Bool = false
     C2bar = nothing
+    critic3_trajectory = nothing
     last_action_log_prob::Vector{Float32} = [0.0f0]
     last_sigma::Vector{Float32} = [0.0f0]
     last_mu::Vector{Float32} = [0.0f0]
@@ -134,9 +135,15 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
         #critic3 is now baseline
         critic3 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic, is_critic2 = false, popart = use_popart)
 
+        critic3_trajectory = CircularArrayTrajectory(;
+                capacity = update_freq * 5,
+                state = Float32 => (size(state_space)[1], n_envs),
+        )
+
         C2bar = deepcopy(critic2)
     else
         critic3 = nothing
+        critic3_trajectory = nothing
         C2bar = nothing
     end
 
@@ -197,6 +204,7 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
             use_exploration_module = use_exploration_module,
             use_whole_delta_targets = use_whole_delta_targets,
             C2bar = C2bar,
+            critic3_trajectory = critic3_trajectory,
         ),
         trajectory = 
         CircularArrayTrajectory(;
@@ -330,6 +338,13 @@ function update!(
         action_log_prob = policy.last_action_log_prob,
         explore_mod = policy.mm.last,
     )
+
+    if !isnothing(policy.critic3_trajectory)
+        push!(
+        policy.critic3_trajectory;
+        state = state(env),
+    )
+    end
 end
 
 
@@ -714,6 +729,30 @@ function td_lambda_targets_ppo3(
 end
 
 
+function antithetic_mean(actor, critic, states; K = 16)
+    μ, ℓσ   = actor(states)
+
+    Σ = exp.(ℓσ)
+
+    acc  = zeros(Float32, 1, size(μ)[2]) 
+
+    for k in 1:K
+        ϵ   = randn(Float32, size(μ))
+
+        a_plus  = μ .+ Σ .* ϵ
+        a_minus = μ .- Σ .* ϵ
+
+        y_plus  = send_to_host(critic(vcat(states, a_plus)))
+        y_minus = send_to_host(critic(vcat(states, a_minus)))
+
+        acc .+= (y_plus .+ y_minus)
+    end
+    mean_critic = acc ./ (2*K)                            # ≈ E_a C2(s,a)
+
+    mean_critic
+end
+
+
 
 
 function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = true, time_step_interval = nothing, microbatch_size = nothing)
@@ -798,7 +837,9 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
 
             gae_deltas = critic2_values - offsets
         else
-            gae_deltas = critic2_values #- offsets
+            mean_c2 = antithetic_mean(AC.actor, AC.critic2, states_flatten_on_host)
+
+            gae_deltas = critic2_values - mean_c2
         end
 
         advantages, returns = generalized_advantage_estimation(
@@ -1063,6 +1104,32 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
         #targets_critic2 = td_lambda_targets_ppo3(rewards, terminal, values, next_values, γ; λ = p.λ_targets)[:]
         targets_critic2 = next_values .* (1 .- terminal)
     end
+
+
+    # critic 2 zero mean tether
+
+    c2 = AC.critic2 #p.C2bar
+
+    # K    = 16 #p.baseline_mc_samples   # z.B. 4 oder 8
+    # μ, ℓσ   = AC.actor(states_flatten_on_host)
+
+    # Σ = exp.(ℓσ)
+
+    # acc  = zeros(Float32, size(targets_critic2))  # [act_dim, batch]
+    # for k in 1:K
+    #     ϵ   = randn(Float32, size(μ))
+
+    #     a_plus  = μ .+ Σ .* ϵ
+    #     a_minus = μ .- Σ .* ϵ
+
+    #     y_plus  = send_to_host(c2(vcat(states_flatten_on_host, a_plus)))
+    #     y_minus = send_to_host(c2(vcat(states_flatten_on_host, a_minus)))
+
+    #     acc .+= (y_plus .+ y_minus)
+    # end
+    # mean_c2 = acc ./ (2*K)
+
+    mean_c2 = antithetic_mean(AC.actor, c2, states_flatten_on_host)
         
 
     for epoch in 1:n_epochs
@@ -1085,6 +1152,9 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
 
             old_v2 = vec(critic2_values)[inds]
 
+            tether = mean((vec(mean_c2)[inds]).^2)
+            zero_mean_tether_factor = 10.8
+
             critic2_input = p.critic2_takes_action ? vcat(s, a) : s
 
             g_critic2 = Flux.gradient(AC.critic2) do critic2
@@ -1101,7 +1171,7 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
 
                 bellman = mean(((tar .- values_pred2) .^ 2))
                 fr_term = mean((values_pred2 .- q_ref[inds]) .^ 2)
-                critic2_loss = bellman + p.critic_frozen_factor * fr_term # .* exp_m[:]
+                critic2_loss = bellman + p.critic_frozen_factor * fr_term + zero_mean_tether_factor * tether # .* exp_m[:]
 
 
                 ignore() do
@@ -1127,49 +1197,53 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
 
     if !isnothing(AC.critic3)
 
-        τ = 0.99
-        for (pb, p) in zip(Flux.params(p.C2bar), Flux.params(AC.critic2))
-            pb .= τ .* pb .+ (1f0 - τ) .* p
-        end
+        # don't use target c2 for now
 
-        K    = 16 #p.baseline_mc_samples   # z.B. 4 oder 8
-        μ, ℓσ   = AC.actor(states_flatten_on_host)
+        # τ = 0.99
+        # for (pb, p) in zip(Flux.params(p.C2bar), Flux.params(AC.critic2))
+        #     pb .= τ .* pb .+ (1f0 - τ) .* p
+        # end
 
-        Σ = exp.(ℓσ)
+        states_c3 = flatten_batch(select_last_dim(p.critic3_trajectory[:state], 1:n))
 
-        acc  = zeros(Float32, size(targets_critic2))  # [act_dim, batch]
-        for k in 1:K
-            ϵ   = randn(Float32, size(μ))
+        c2 = AC.critic2 #p.C2bar
 
-            a_plus  = μ .+ Σ .* ϵ
-            a_minus = μ .- Σ .* ϵ
+        # K    = 16 #p.baseline_mc_samples   # z.B. 4 oder 8
+        # μ, ℓσ   = AC.actor(states_c3)
 
-            y_plus  = send_to_host(p.C2bar(vcat(flatten_batch(states), a_plus)))
-            y_minus = send_to_host(p.C2bar(vcat(flatten_batch(states), a_minus)))
+        # Σ = exp.(ℓσ)
 
-            acc .+= (y_plus .+ y_minus)
-        end
-        mean_c2 = acc ./ (2*K)                                   # ≈ E_a C2(s,a)
+        # acc  = zeros(Float32, 1, size(μ)[2]) 
+
+        # for k in 1:K
+        #     ϵ   = randn(Float32, size(μ))
+
+        #     a_plus  = μ .+ Σ .* ϵ
+        #     a_minus = μ .- Σ .* ϵ
+
+        #     y_plus  = send_to_host(c2(vcat(states_c3, a_plus)))
+        #     y_minus = send_to_host(c2(vcat(states_c3, a_minus)))
+
+        #     acc .+= (y_plus .+ y_minus)
+        # end
+        # mean_c2 = acc ./ (2*K)                            # ≈ E_a C2(s,a)
+
+        mean_c2 = antithetic_mean(AC.actor, c2, states_c3)
+
         targets_critic3 = reshape(mean_c2, n_envs, :) .* (1 .- terminal)
 
         #targets_critic3 = rewards + γ * critic2_values .* (1 .- terminal) - values
 
         for epoch in 1:n_epochs
 
-            rand_inds = shuffle!(rng, Vector(1:n_envs*n_rollout))
+            rand_inds = shuffle!(rng, Vector(1:size(states_c3)[2]))
 
             for i in 1:n_microbatches
 
                 inds = rand_inds[(i-1)*microbatch_size+1:i*microbatch_size]
 
-                s = to_device(collect(select_last_dim(states_flatten_on_host, inds)))
-                a = to_device(collect(select_last_dim(actions_flatten, inds)))
+                s = to_device(collect(select_last_dim(states_c3, inds)))
 
-                # nv′ = vec(next_values)[inds]
-                # rew = vec(rewards)[inds]
-                # ter = vec(terminal)[inds]
-
-                #tar = rew + γ * nv′ .* (1 .- ter)
                 tar = vec(targets_critic3)[inds]
 
                 critic3_input = s
