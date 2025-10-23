@@ -1085,6 +1085,10 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
             end
 
         end
+
+        if stop_update
+            break
+        end
     end
 
     #critic2_input = p.critic2_takes_action ? vcat(next_states, AC.actor.μ(next_states)) : next_states
