@@ -1,5 +1,5 @@
 
-Base.@kwdef mutable struct SACPolicy <: AbstractPolicy
+Base.@kwdef mutable struct SACPolicy2 <: AbstractPolicy
     actor::GaussianNetwork
     qnetwork1
     qnetwork2
@@ -39,6 +39,8 @@ Base.@kwdef mutable struct SACPolicy <: AbstractPolicy
     device_rng =Random.GLOBAL_RNG
     use_popart = false
 
+    fear_factor = 0.1f0
+
     # Logging
     last_reward_term::Float32 =0.0f0
     last_entropy_term::Float32 =0.0f0
@@ -53,7 +55,7 @@ Base.@kwdef mutable struct SACPolicy <: AbstractPolicy
 end
 
 
-function create_agent_sac(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 2.0f0, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false)
+function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 2.0f0, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -76,7 +78,7 @@ function create_agent_sac(;action_space, state_space, use_gpu = false, rng, y, t
     target_qnetwork2 = deepcopy(qnetwork2)
 
     Agent(
-        policy = SACPolicy(
+        policy = SACPolicy2(
            actor = GaussianNetwork(
                     μ = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = tanh_end),
                     logσ = create_logσ(logσ_is_network = logσ_is_network, ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, start_logσ = start_logσ),
@@ -129,7 +131,7 @@ end
 
 
 # TODO: handle Training/Testing mode
-function (p::SACPolicy)(env)
+function (p::SACPolicy2)(env)
 
     if p.update_step <= p.start_steps
         action = p.start_policy(env)
@@ -165,7 +167,7 @@ end
 
 function update!(
     trajectory::AbstractTrajectory,
-    policy::SACPolicy,
+    policy::SACPolicy2,
     env::AbstractEnv,
     ::PreActStage,
     action,
@@ -184,7 +186,7 @@ end
 
 function update!(
     trajectory::AbstractTrajectory,
-    policy::SACPolicy,
+    policy::SACPolicy2,
     env::AbstractEnv,
     ::PostActStage,
 )
@@ -197,7 +199,7 @@ function update!(
 end
 
 function update!(
-    p::SACPolicy,
+    p::SACPolicy2,
     t::AbstractTrajectory,
     ::AbstractEnv,
     ::PostActStage,
@@ -224,7 +226,7 @@ end
 
 
 
-function _update!(p::SACPolicy, t::AbstractTrajectory)
+function _update!(p::SACPolicy2, t::AbstractTrajectory)
     #this is for imitation learning
 
     if length(size(p.action_space)) == 2
@@ -242,19 +244,19 @@ end
 
 
 
-function update!(p::SACPolicy, batch::NamedTuple{SARTS})
+function update!(p::SACPolicy2, batch::NamedTuple{SARTS})
     s, a, r, t, s′ = send_to_device(device(p.qnetwork1), batch)
 
     γ, τ, α = p.γ, p.τ, p.α
 
-    a′, log_π′ = p.actor(p.device_rng, s′; is_sampling=true, is_return_log_prob=true)
+    a′, logp_π′ = p.actor(p.device_rng, s′; is_sampling=true, is_return_log_prob=true)
     q′_input = vcat(s′, a′)
     q′ = min.(p.target_qnetwork1(q′_input), p.target_qnetwork2(q′_input))
 
-    y = r .+ γ .* (1 .- t) .* dropdims(q′ .- α .* log_π′, dims=1)
+    y = r .+ γ .* (1 .- t) .* dropdims(q′ .- α .* logp_π′, dims=1)
 
     p.last_target_q_mean = mean(y)
-    p.last_mean_minus_log_pi = mean(-log_π′)
+    p.last_mean_minus_log_pi = mean(-logp_π′)
 
 
     if isnothing(p.actor_state_tree) || isnothing(p.qnetwork1_state_tree) || isnothing(p.qnetwork2_state_tree)
@@ -308,17 +310,26 @@ function update!(p::SACPolicy, batch::NamedTuple{SARTS})
     if p.update_step % (p.update_freq * 10) == 0
         # Train Policy
         p_grad = Flux.gradient(p.actor) do actor
-            a, log_π = actor(p.device_rng, s; is_sampling=true, is_return_log_prob=true)
+            a, logp_π = actor(p.device_rng, s; is_sampling=true, is_return_log_prob=true)
             q_input = vcat(s, a)
             q = min.(p.qnetwork1(q_input), p.qnetwork2(q_input))
             reward = mean(q)
-            entropy = mean(log_π)
+            entropy = mean(logp_π)
+
             ignore_derivatives() do
                 p.last_reward_term = reward
                 p.last_entropy_term = α * entropy
                 p.last_actor_loss = α * entropy - reward
+
+                #for fear
+                logp_π_fixed = deepcopy(logp_π)
             end
-            α * entropy - reward
+
+            fear = mean( (exp.(logp_π - logp_π_fixed) .- 1).^2 ) .* p.fear_factor
+
+            loss = α * entropy - reward + fear
+
+            loss
         end
         Flux.update!(p.actor_state_tree, p.actor, p_grad[1])
     end
@@ -328,10 +339,10 @@ function update!(p::SACPolicy, batch::NamedTuple{SARTS})
 
     # Tune entropy automatically
     if p.automatic_entropy_tuning
-        # p.log_α -= p.lr_alpha * p.α * mean(-log_π′ .- p.target_entropy)
+        # p.log_α -= p.lr_alpha * p.α * mean(-logp_π′ .- p.target_entropy)
 
         log_α_grad = Flux.gradient(p.log_α) do log_α
-            exp(log_α[1]) .* mean(-log_π′ .- p.target_entropy)
+            exp(log_α[1]) .* mean(-logp_π′ .- p.target_entropy)
         end
         Flux.update!(p.log_α_state_tree, p.log_α, log_α_grad[1])
 
@@ -346,7 +357,7 @@ function update!(p::SACPolicy, batch::NamedTuple{SARTS})
         println("Reward Term = ",  p.last_reward_term)
         println("Entropy Term = ",  p.last_entropy_term)
 
-        println("mean(-logπ′) = ",  mean(-log_π′))
+        println("mean(-logπ′) = ",  mean(-logp_π′))
         println("target_entropy = ", p.target_entropy)
         println("alpha = ",  p.α)
     end

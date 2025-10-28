@@ -886,9 +886,10 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
 
 
 
+    reset_optimizers = (p.update_step / p.update_freq) % 400 == 0
+    start_optimizers = isnothing(AC.actor_state_tree) || isnothing(AC.sigma_state_tree) || isnothing(AC.critic_state_tree) || isnothing(AC.critic2_state_tree)
 
-
-    if isnothing(AC.actor_state_tree) || isnothing(AC.sigma_state_tree) || isnothing(AC.critic_state_tree) || isnothing(AC.critic2_state_tree)
+    if start_optimizers || reset_optimizers
         println("________________________________________________________________________")
         println("Reset Optimizers")
         println("________________________________________________________________________")
