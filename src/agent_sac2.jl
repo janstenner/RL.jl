@@ -226,6 +226,25 @@ end
 
 
 
+
+# ----- Q-basierte Maske für SAC: großes Q => kleine w -----
+function q_rank_mask(q_batch::AbstractVector{<:Real};
+                     target_frac::Float32=0.30f0, sharpness::Float32=20f0)
+    q = Float32.(q_batch)
+    B = length(q)
+    r = (ordinalrank(q; rev=true) .- 1f0) ./ max(1f0, B-1f0)  # r=0 bei größtem Q
+    @. 1f0 / (1f0 + exp(-sharpness*(r - target_frac))) |> Float32
+end
+
+
+
+# Anteil-Controller
+function adjust_fear_factor(fear_factor, frac_changed; target=0.30f0, up=1.20f0, down=0.85f0)
+    frac_changed > target ? fear_factor*up : fear_factor*down
+end
+
+
+
 function _update!(p::SACPolicy2, t::AbstractTrajectory)
     #this is for imitation learning
 
@@ -308,9 +327,15 @@ function update!(p::SACPolicy2, batch::NamedTuple{SARTS})
 
 
     if p.update_step % (p.update_freq * 10) == 0
+
+        target_frac = 0.30f0
+        τ_change = 1f-5
+
+        μ_before, logσ_before = p.actor(p.device_rng, s)
+
         # Train Policy
         p_grad = Flux.gradient(p.actor) do actor
-            a, logp_π = actor(p.device_rng, s; is_sampling=true, is_return_log_prob=true)
+            a, logp_π, μ, logσ = actor(p.device_rng, s; is_sampling=true, is_return_log_prob=true, is_return_params=true)
             q_input = vcat(s, a)
             q = min.(p.qnetwork1(q_input), p.qnetwork2(q_input))
             reward = mean(q)
@@ -321,17 +346,54 @@ function update!(p::SACPolicy2, batch::NamedTuple{SARTS})
                 p.last_entropy_term = α * entropy
                 p.last_actor_loss = α * entropy - reward
 
-                #for fear
-                logp_π_fixed = deepcopy(logp_π)
             end
 
-            fear = mean( (exp.(logp_π - logp_π_fixed) .- 1).^2 ) .* p.fear_factor
+            #fear = mean( (exp.(logp_π - logp_π_fixed) .- 1).^2 ) .* p.fear_factor
 
-            loss = α * entropy - reward + fear
+            actor_term = α * entropy - reward
+
+            μ_old    = Zygote.dropgrad(μ)
+            logσ_old = Zygote.dropgrad(logσ)
+
+            # KL(new || old) für diagonale Gauß-Policy, pro Sample
+            σ2   = exp.(2f0 .* logσ)
+            σ0_2 = exp.(2f0 .* logσ_old)
+            t1 = (σ2 ./ σ0_2)
+            t2 = ((μ .- μ_old).^2) ./ σ0_2
+            KLs = vec(sum(0.5f0 .* (t1 .+ t2 .- 1f0 .+ 2f0 .* (logσ_old .- logσ)); dims=1))
+            KLs = Float32.(KLs)
+
+            # weiche 70/30-Maske aus Q-Rängen (stopgrad)
+            w = ignore_derivatives() do
+                q_host = collect(Float32.(q))[:]
+                q_rank_mask(q_host; target_frac=target_frac)
+            end
+
+            fear_term = p.fear_factor * mean(w .* KLs)
+
+            loss = actor_term + fear_term
 
             loss
         end
         Flux.update!(p.actor_state_tree, p.actor, p_grad[1])
+
+
+        μ_new, logσ_new = p.actor(p.device_rng, s)
+
+        σ2   = exp.(2f0 .* logσ_new)
+        σ0_2 = exp.(2f0 .* logσ_before)
+        t1 = (σ2 ./ σ0_2)
+        t2 = ((μ_new .- μ_before).^2) ./ σ0_2
+        KLs = vec(sum(0.5f0 .* (t1 .+ t2 .- 1f0 .+ 2f0 .* (logσ_before .- logσ_new)); dims=1))
+        KLs = Float32.(KLs)
+
+        frac_changed = mean(KLs .> τ_change)
+        #@show frac_changed
+        ff_before = deepcopy(p.fear_factor)
+        p.fear_factor = adjust_fear_factor(p.fear_factor, frac_changed; target=target_frac, up=1.01f0, down=0.99f0)
+
+        #@show p.fear_factor - ff_before
+        @show p.fear_factor
     end
 
     
@@ -363,11 +425,18 @@ function update!(p::SACPolicy2, batch::NamedTuple{SARTS})
     end
 
     # polyak averaging
-    for (dest, src) in zip(
-        Flux.params([p.target_qnetwork1, p.target_qnetwork2]),
-        Flux.params([p.qnetwork1, p.qnetwork2]),
-    )
-        dest .= (1 - τ) .* dest .+ τ .* src
+    Functors.fmap(p.target_qnetwork1, p.qnetwork1) do tgt, src
+        if tgt isa AbstractArray && src isa AbstractArray
+            @. tgt = (1 - τ) * tgt + τ * src
+        end
+        tgt
+    end
+
+    Functors.fmap(p.target_qnetwork2, p.qnetwork2) do tgt, src
+        if tgt isa AbstractArray && src isa AbstractArray
+            @. tgt = (1 - τ) * tgt + τ * src
+        end
+        tgt
     end
 
     if p.use_popart

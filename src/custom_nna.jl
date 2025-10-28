@@ -105,7 +105,7 @@ This function is compatible with a multidimensional action space. When outputtin
 - `is_sampling::Bool=false`, whether to sample from the obtained normal distribution. 
 - `is_return_log_prob::Bool=false`, whether to calculate the conditional probability of getting actions in the given state.
 """
-function (model::GaussianNetwork)(rng::AbstractRNG, s; is_sampling::Bool=false, is_return_log_prob::Bool=false)
+function (model::GaussianNetwork)(rng::AbstractRNG, s; is_sampling::Bool=false, is_return_log_prob::Bool=false, is_return_params::Bool = false)
 
     x = model.pre(s)
 
@@ -137,7 +137,12 @@ function (model::GaussianNetwork)(rng::AbstractRNG, s; is_sampling::Bool=false, 
 
         if is_return_log_prob
             logp_π = sum(normlogpdf(μ, σ, u) .- (2.0f0 .* (log(2.0f0) .- u .- softplus.(-2.0f0 .* u))), dims=1)
-            return z, logp_π
+
+            if is_return_params
+                return z, logp_π, μ, deepcopy(logσ)
+            else
+                return z, logp_π
+            end
         else
             return z
         end

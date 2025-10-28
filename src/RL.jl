@@ -27,6 +27,7 @@ using ChainRulesCore
 using Static
 using CoherentNoise
 using StatsBase
+using Functors
 
 
 
