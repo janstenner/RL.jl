@@ -6,12 +6,19 @@ Base.@kwdef mutable struct SACPolicy2 <: AbstractPolicy
     target_qnetwork1
     target_qnetwork2
 
+    critic
+    critic_frozen
+
     optimizer_actor = ADAM()
     optimizer_qnetwork1 = ADAM()
     optimizer_qnetwork2 = ADAM()
+    optimizer_critic = ADAM()
     actor_state_tree = nothing
     qnetwork1_state_tree = nothing
     qnetwork2_state_tree = nothing
+    critic_state_tree = nothing
+
+    critic_frozen_factor
 
     action_space::Space
     state_space::Space
@@ -55,7 +62,7 @@ Base.@kwdef mutable struct SACPolicy2 <: AbstractPolicy
 end
 
 
-function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 2.0f0, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false)
+function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 2.0f0, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false, critic_frozen_factor = 0.1f0)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -77,6 +84,10 @@ function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, 
     qnetwork2 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic, is_critic2 = true, popart = use_popart)
     target_qnetwork2 = deepcopy(qnetwork2)
 
+    critic = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic, popart = use_popart)
+
+    critic_frozen = deepcopy(critic)
+
     Agent(
         policy = SACPolicy2(
            actor = GaussianNetwork(
@@ -90,9 +101,15 @@ function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, 
             target_qnetwork1 = target_qnetwork1,
             target_qnetwork2 = target_qnetwork2,
 
-            optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
-            optimizer_qnetwork1 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
-            optimizer_qnetwork2 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
+            critic = critic,
+            critic_frozen = critic_frozen,
+
+            optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas, 1e-4, 1e-8;)),
+            optimizer_qnetwork1 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas, 1e-4, 1e-8;)),
+            optimizer_qnetwork2 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas, 1e-4, 1e-8;)),
+            optimizer_critic = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas, 1e-4, 1e-8;)),
+
+            critic_frozen_factor = critic_frozen_factor,
 
             action_space = action_space,
             state_space = state_space,
@@ -225,6 +242,13 @@ end
 
 
 
+# ∥∇_a Q_min(s,a)∥ 
+function grad_a_q_norms(qnet1, qnet2, s_batch, a_batch)
+    qmin_sum(a_) = sum(min.(qnet1(vcat(s_batch, a_)), qnet2(vcat(s_batch, a_))))
+    g = Zygote.gradient(qmin_sum, a_batch)[1]   # same shape as a_batch
+    mags = sqrt.(sum(abs2, g; dims=1))[:]        # per-sample ‖∇_a Q_min‖
+    mags
+end
 
 
 # ----- Q-basierte Maske für SAC: großes Q => kleine w -----
@@ -239,8 +263,11 @@ end
 
 
 # Anteil-Controller
-function adjust_fear_factor(fear_factor, frac_changed; target=0.30f0, up=1.20f0, down=0.85f0)
-    frac_changed > target ? fear_factor*up : fear_factor*down
+function adjust_fear_factor(fear_factor, frac_changed; target=0.30f0, up=1.001f0, down=0.999f0, min = 1e-3, max = 1e2)
+        
+    new_factor = frac_changed > target ? fear_factor*up : fear_factor*down
+
+    clamp(new_factor, min, max)
 end
 
 
@@ -268,14 +295,7 @@ function update!(p::SACPolicy2, batch::NamedTuple{SARTS})
 
     γ, τ, α = p.γ, p.τ, p.α
 
-    a′, logp_π′ = p.actor(p.device_rng, s′; is_sampling=true, is_return_log_prob=true)
-    q′_input = vcat(s′, a′)
-    q′ = min.(p.target_qnetwork1(q′_input), p.target_qnetwork2(q′_input))
 
-    y = r .+ γ .* (1 .- t) .* dropdims(q′ .- α .* logp_π′, dims=1)
-
-    p.last_target_q_mean = mean(y)
-    p.last_mean_minus_log_pi = mean(-logp_π′)
 
 
     if isnothing(p.actor_state_tree) || isnothing(p.qnetwork1_state_tree) || isnothing(p.qnetwork2_state_tree)
@@ -286,8 +306,104 @@ function update!(p::SACPolicy2, batch::NamedTuple{SARTS})
         p.qnetwork1_state_tree = Flux.setup(p.optimizer_qnetwork1, p.qnetwork1)
         p.qnetwork2_state_tree = Flux.setup(p.optimizer_qnetwork2, p.qnetwork2)
 
+        p.critic_state_tree = Flux.setup(p.optimizer_critic, p.critic)
+
+        Optimisers.adjust!(p.critic_state_tree.layers[end]; lambda = 0.0)
+        Optimisers.adjust!(p.qnetwork1_state_tree.layers[end]; lambda = 0.0)
+        Optimisers.adjust!(p.qnetwork2_state_tree.layers[end]; lambda = 0.0)
+
         p.log_α_state_tree = Flux.setup(p.optimizer_log_α, p.log_α)
     end
+
+
+
+
+
+
+    # v_ref = p.critic_frozen( flatten_batch(s) )[:]
+    # next_values = reshape( p.critic( s′ ) , size(s)[2], :)
+
+    # #@show size(s)[2]
+    # #@show size(r), size(t), size(next_values)
+
+    # targets = td_lambda_targets(r, t, next_values, γ; λ = 0.9f0)[:]
+
+    # g_critic = Flux.gradient(p.critic) do critic
+
+    #     values_pred = critic(s)[:]
+
+    #     bellman = mean(((targets .- values_pred) .^ 2))
+    #     fr_term = mean((values_pred .- v_ref) .^ 2)
+    #     critic_loss = bellman + p.critic_frozen_factor * fr_term
+
+    #     critic_loss
+    # end
+
+    # Flux.update!(p.critic_state_tree, p.critic, g_critic[1])
+    # if p.use_popart
+    #     update!(p.critic.layers[end], targets) 
+    # end
+
+
+    # a′, logp_π′ = p.actor(p.device_rng, s′; is_sampling=true, is_return_log_prob=true)
+    # q′_input = vcat(s′, a′)
+    # q′ = min.(p.target_qnetwork1(q′_input), p.target_qnetwork2(q′_input))
+
+    # y = r .+ γ .* (1 .- t) .* dropdims(q′ .- α .* logp_π′, dims=1)
+
+
+
+    # @show size(s′), size(logp_π′), size(flatten_batch(s′)), size(flatten_batch(logp_π′))
+
+    next_states = flatten_batch( s′ )
+
+    K = 16
+
+    μ, logσ = p.actor(p.device_rng, next_states)
+
+    acc_mu1  = zeros(Float32, 1, size(μ)[2]) 
+    acc_mu2  = zeros(Float32, 1, size(μ)[2]) 
+    acc_logp  = zeros(Float32, 1, size(μ)[2]) 
+    acc_mu  = zeros(Float32, 1, size(μ)[2]) 
+
+    for k in 1:K
+        aa, logp_π = p.actor(p.device_rng, next_states; is_sampling=true, is_return_log_prob=true)
+
+        acc_logp .+= logp_π
+
+        a_plus  = aa
+        a_minus = μ .- (aa .- μ)
+
+        y_plus1  = send_to_host(p.target_qnetwork1(vcat(next_states, a_plus)))
+        y_minus1 = send_to_host(p.target_qnetwork1(vcat(next_states, a_minus)))
+
+        y_plus2  = send_to_host(p.target_qnetwork2(vcat(next_states, a_plus)))
+        y_minus2 = send_to_host(p.target_qnetwork2(vcat(next_states, a_minus)))
+
+        # acc_mu1 .+= (y_plus1 .+ y_minus1) .- 2 * α .* logp_π
+        # acc_mu2 .+= (y_plus2 .+ y_minus2) .- 2 * α .* logp_π
+
+        acc_mu .+= min.(y_plus1, y_plus2) .- α .* acc_logp
+        acc_mu .+= min.(y_minus1, y_minus2) .- α .* acc_logp
+    end
+
+    acc_mu1 ./= 2*K
+    acc_mu2 ./= 2*K
+    acc_logp ./= K
+
+    acc_mu ./= 2*K
+
+
+    # q′ = min.(acc_mu1, acc_mu2)
+    q′ = acc_mu
+
+    y = r .+ γ .* (1 .- t) .* q′ #(q′ .- α .* acc_logp)
+
+    
+    logp_π′ = acc_logp
+
+    p.last_target_q_mean = mean(y)
+    p.last_mean_minus_log_pi = mean(-logp_π′)
 
     # Train Q Networks
     q_input = vcat(s, a)
@@ -328,15 +444,15 @@ function update!(p::SACPolicy2, batch::NamedTuple{SARTS})
 
     if p.update_step % (p.update_freq * 10) == 0
 
-        target_frac = 0.30f0
-        τ_change = 1f-5
+        target_frac = 0.05f0
+        τ_change = 1f-6
 
         μ_before, logσ_before = p.actor(p.device_rng, s)
 
         # Train Policy
         p_grad = Flux.gradient(p.actor) do actor
-            a, logp_π, μ, logσ = actor(p.device_rng, s; is_sampling=true, is_return_log_prob=true, is_return_params=true)
-            q_input = vcat(s, a)
+            aa, logp_π, μ, logσ = actor(p.device_rng, s; is_sampling=true, is_return_log_prob=true, is_return_params=true)
+            q_input = vcat(s, aa)
             q = min.(p.qnetwork1(q_input), p.qnetwork2(q_input))
             reward = mean(q)
             entropy = mean(logp_π)
@@ -365,11 +481,33 @@ function update!(p::SACPolicy2, batch::NamedTuple{SARTS})
 
             # weiche 70/30-Maske aus Q-Rängen (stopgrad)
             w = ignore_derivatives() do
-                q_host = collect(Float32.(q))[:]
-                q_rank_mask(q_host; target_frac=target_frac)
+                # q_host = collect(Float32.(q))[:]
+                # q_rank_mask(q_host; target_frac=target_frac)
+
+                mags = grad_a_q_norms(p.qnetwork1, p.qnetwork2, s, aa)
+                q_rank_mask(mags; target_frac=target_frac)
             end
 
+            #@show w
+
             fear_term = p.fear_factor * mean(w .* KLs)
+
+
+            # new experimental loss
+
+            actor_inds = findall(x -> x<0.5, w)
+            fear_inds = findall(x -> x>=0.5, w)
+
+            if (length(actor_inds) / length(w)) - target_frac > 0.05
+                @show length(actor_inds) / length(w)
+            end
+
+            reward = mean(q[actor_inds])
+            entropy = mean(logp_π[actor_inds])
+
+            fear_term = mean(KLs[fear_inds])
+
+            actor_term = α * entropy - reward
 
             loss = actor_term + fear_term
 
@@ -390,10 +528,10 @@ function update!(p::SACPolicy2, batch::NamedTuple{SARTS})
         frac_changed = mean(KLs .> τ_change)
         #@show frac_changed
         ff_before = deepcopy(p.fear_factor)
-        p.fear_factor = adjust_fear_factor(p.fear_factor, frac_changed; target=target_frac, up=1.01f0, down=0.99f0)
+        p.fear_factor = adjust_fear_factor(p.fear_factor, frac_changed; target=target_frac, up=1.001f0, down=0.999f0, min = 1e-3, max = 1e2)
 
         #@show p.fear_factor - ff_before
-        @show p.fear_factor
+        #@show p.fear_factor
     end
 
     
@@ -408,7 +546,7 @@ function update!(p::SACPolicy2, batch::NamedTuple{SARTS})
         end
         Flux.update!(p.log_α_state_tree, p.log_α, log_α_grad[1])
 
-        clamp!(p.log_α, -6.5, Inf)
+        clamp!(p.log_α, -12.5, Inf)
 
         p.α = exp.(p.log_α)[1]
 
