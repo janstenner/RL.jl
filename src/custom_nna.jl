@@ -98,46 +98,76 @@ GaussianNetwork(pre, μ, logσ, min_σ=0.0f0, max_σ=Inf32, normalizer=tanh) = G
 Flux.@layer GaussianNetwork
 
 
-"""
-This function is compatible with a multidimensional action space. When outputting an action, it uses the `normalizer` function to normalize it elementwise.
+# ---- constants + helpers (optional; du nutzt bereits normlogpdf) ----
+const LOG2F = log(2f0)
 
-- `rng::AbstractRNG=Random.GLOBAL_RNG`
-- `is_sampling::Bool=false`, whether to sample from the obtained normal distribution. 
-- `is_return_log_prob::Bool=false`, whether to calculate the conditional probability of getting actions in the given state.
-"""
-function (model::GaussianNetwork)(rng::AbstractRNG, s; is_sampling::Bool=false, is_return_log_prob::Bool=false, is_return_params::Bool = false)
+# numerisch stabil: log|det d(tanh(u))/du| = sum 2*(log 2 - u - softplus(-2u))
+log_jac_tanh(u) = 2f0 .* (LOG2F .- u .- softplus.(-2f0 .* u))
 
+# ---- GaussianNetwork call mit Antithetic-Sampling ----
+function (model::GaussianNetwork)(
+    rng::AbstractRNG, s;
+    is_sampling::Bool=false,
+    is_return_log_prob::Bool=false,
+    is_return_params::Bool=false,
+    is_antithetic::Bool=false
+)
     x = model.pre(s)
 
     if model.logσ_is_network
         μ, raw_logσ = model.μ(x), model.logσ(x)
     else
         μ, raw_logσ = model.μ(x), model.logσ
-        # the first method leads to Cuda complaining about scalar indexing
-        # raw_logσ = repeat(raw_logσ, outer=(1,size(μ)[2]))
         if ndims(μ) >= 2
-            # TODO: Make it GPU friendly again (CUDA.fill or like Flux Dense Layer does it with bias - Linear Layer with freezing)
-            #raw_logσ = hcat([raw_logσ for i in 1:size(μ)[2]]...)
-            raw_logσ = send_to_device(device(model.logσ), ones(Float32,1,size(μ)[2])) .* model.logσ
+            raw_logσ = send_to_device(device(model.logσ), ones(Float32, 1, size(μ)[2])) .* model.logσ
         else
             raw_logσ = raw_logσ[:]
         end
     end
 
+    # Zuerst per min_σ/max_σ, dann harter Safety-Clamp in Log-Space
     logσ = clamp.(raw_logσ, log(model.min_σ), log(model.max_σ))
-    
-    if is_sampling
-        σ = exp.(logσ)
-        noise = Zygote.ignore() do
-            noise = randn(rng, Float32, size(μ))
-            noise
+    logσ = clamp.(logσ, -20f0, 2f0)  # harte Ober-/Untergrenze für Varianz
+
+    if !is_sampling
+        return μ, deepcopy(logσ)
+    end
+
+    σ = exp.(logσ)
+
+    noise = Zygote.ignore() do
+        randn(rng, Float32, size(μ))
+    end
+
+    if is_antithetic
+        # antithetische Paare im u-Space
+        u_plus  = μ .+ σ .* noise
+        u_minus = μ .- σ .* noise   # == 2μ - u_plus
+
+        z_plus  = model.normalizer.(u_plus)
+        z_minus = model.normalizer.(u_minus)
+
+        if is_return_log_prob
+            # logπ(u) = logN(u; μ,σ) - log|det J_tanh(u)| ; Summation über Action-Dim (dims=1)
+            logp_plus  = sum(normlogpdf(μ, σ, u_plus)  .- log_jac_tanh(u_plus),  dims=1)
+            logp_minus = sum(normlogpdf(μ, σ, u_minus) .- log_jac_tanh(u_minus), dims=1)
+
+            if is_return_params
+                return z_plus, logp_plus, z_minus, logp_minus, μ, deepcopy(logσ)
+            else
+                return z_plus, logp_plus, z_minus, logp_minus
+            end
+        else
+            return z_plus, z_minus
         end
+
+    else
+        # gewöhnliches einzelnes Sample
         u = μ .+ σ .* noise
         z = model.normalizer.(u)
 
         if is_return_log_prob
-            logp_π = sum(normlogpdf(μ, σ, u) .- (2.0f0 .* (log(2.0f0) .- u .- softplus.(-2.0f0 .* u))), dims=1)
-
+            logp_π = sum(normlogpdf(μ, σ, u) .- log_jac_tanh(u), dims=1)
             if is_return_params
                 return z, logp_π, μ, deepcopy(logσ)
             else
@@ -146,11 +176,15 @@ function (model::GaussianNetwork)(rng::AbstractRNG, s; is_sampling::Bool=false, 
         else
             return z
         end
-    else
-        return μ, deepcopy(logσ)
     end
 end
 
-function (model::GaussianNetwork)(state; is_sampling::Bool=false, is_return_log_prob::Bool=false)
-    model(Random.GLOBAL_RNG, state; is_sampling=is_sampling, is_return_log_prob=is_return_log_prob)
+# convenience-wrapper ohne rng (beibehaltener Default)
+function (model::GaussianNetwork)(
+    state; is_sampling::Bool=false, is_return_log_prob::Bool=false, is_antithetic::Bool=false
+)
+    model(Random.GLOBAL_RNG, state;
+          is_sampling=is_sampling,
+          is_return_log_prob=is_return_log_prob,
+          is_antithetic=is_antithetic)
 end
