@@ -49,6 +49,7 @@ Base.@kwdef mutable struct SACPolicy2 <: AbstractPolicy
     fear_factor = 0.1f0
     on_policy_critic_update_freq = 2500
     λ_targets = 0.7f0
+    target_frac = 0.3f0
 
     # Logging
     last_reward_term::Float32 =0.0f0
@@ -64,7 +65,7 @@ Base.@kwdef mutable struct SACPolicy2 <: AbstractPolicy
 end
 
 
-function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 7.0f0, min_σ = 2f-9, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false, critic_frozen_factor = 0.1f0, on_policy_critic_update_freq = 2500, λ_targets= 0.7f0, fear_factor = 0.1f0,)
+function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 7.0f0, min_σ = 2f-9, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false, critic_frozen_factor = 0.1f0, on_policy_critic_update_freq = 2500, λ_targets= 0.7f0, fear_factor = 0.1f0, target_frac = 0.3f0,)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -140,6 +141,7 @@ function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, 
             fear_factor = fear_factor,
             on_policy_critic_update_freq = on_policy_critic_update_freq,
             λ_targets = λ_targets,
+            target_frac = target_frac,
         ),
         trajectory = 
         CircularArrayTrajectory(;
@@ -459,7 +461,7 @@ function on_policy_critic_update(p::SACPolicy2, traj::AbstractTrajectory; whole_
 
     # on policy actor update
 
-    target_frac = 0.3f0 #Float32(1.0/n_samples)
+    target_frac = p.target_frac #Float32(1.0/n_samples)
     τ_change = 3f-4
 
     μ_before, logσ_before = p.actor(p.device_rng, s)
