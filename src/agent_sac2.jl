@@ -525,8 +525,8 @@ function on_policy_critic_update(p::SACPolicy2, traj::AbstractTrajectory; whole_
                 @show length(actor_inds) / length(w)
             end
 
-            reward = mean(q[actor_inds])
-            entropy = mean(logp_π[actor_inds])
+            #reward = mean(q[actor_inds])
+            #entropy = mean(logp_π[actor_inds])
 
             fear_term = p.fear_factor * mean(KLs[fear_inds])
             #fear_term = p.fear_factor * mean((μ .- μ_before).^2) # only mean value
