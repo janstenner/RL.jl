@@ -388,7 +388,7 @@ function PPOPolicy2(;
         fear_factor,
         fear_scale,
         new_loss,
-        use_exploration_module = use_exploration_module,
+        use_exploration_module,
         mm,
         critic_target,
         [0.0],
