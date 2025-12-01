@@ -50,6 +50,7 @@ Base.@kwdef mutable struct SACPolicy2 <: AbstractPolicy
     on_policy_critic_update_freq = 2500
     λ_targets = 0.7f0
     target_frac = 0.3f0
+    verbose::Bool = true
 
     # Logging
     last_reward_term::Float32 =0.0f0
@@ -65,7 +66,7 @@ Base.@kwdef mutable struct SACPolicy2 <: AbstractPolicy
 end
 
 
-function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 7.0f0, min_σ = 2f-9, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false, critic_frozen_factor = 0.1f0, on_policy_critic_update_freq = 2500, λ_targets= 0.7f0, fear_factor = 0.1f0, target_frac = 0.3f0,)
+function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 7.0f0, min_σ = 2f-9, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false, critic_frozen_factor = 0.1f0, on_policy_critic_update_freq = 2500, λ_targets= 0.7f0, fear_factor = 0.1f0, target_frac = 0.3f0, verbose = true,)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -142,6 +143,7 @@ function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, 
             on_policy_critic_update_freq = on_policy_critic_update_freq,
             λ_targets = λ_targets,
             target_frac = target_frac,
+            verbose = verbose,
         ),
         trajectory = 
         CircularArrayTrajectory(;
@@ -551,13 +553,15 @@ function on_policy_critic_update(p::SACPolicy2, traj::AbstractTrajectory; whole_
     KLs = Float32.(KLs)
 
     frac_changed = mean(KLs .> τ_change)
-    @show mean(logσ_before), mean(logσ_new), mean(μ_before), mean(μ_new)
-    @show frac_changed
     ff_before = deepcopy(p.fear_factor)
     p.fear_factor = adjust_fear_factor(p.fear_factor, frac_changed; target=target_frac)
 
-    #@show p.fear_factor - ff_before
-    @show p.fear_factor
+    if p.verbose
+        #@show p.fear_factor - ff_before
+        @show mean(logσ_before), mean(logσ_new), mean(μ_before), mean(μ_new)
+        @show frac_changed
+        @show p.fear_factor
+    end
 
     # Tune entropy automatically
     if p.automatic_entropy_tuning
@@ -578,12 +582,14 @@ function on_policy_critic_update(p::SACPolicy2, traj::AbstractTrajectory; whole_
     end
 
 
-    println("Reward Term = ",  p.last_reward_term)
-    println("Entropy Term = ",  p.last_entropy_term)
+    if p.verbose
+        println("Reward Term = ",  p.last_reward_term)
+        println("Entropy Term = ",  p.last_entropy_term)
 
-    println("mean(-logπ′) = ",  mean(-logp_π′))
-    println("target_entropy = ", p.target_entropy)
-    println("alpha = ",  p.α)
+        println("mean(-logπ′) = ",  mean(-logp_π′))
+        println("target_entropy = ", p.target_entropy)
+        println("alpha = ",  p.α)
+    end
 
 end
 
