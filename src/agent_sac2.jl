@@ -469,12 +469,12 @@ function on_policy_critic_update(p::SACPolicy2, traj::AbstractTrajectory; whole_
     μ_before, logσ_before = p.actor(p.device_rng, s)
 
 
-    acc_mags  = antithetic_mean_sac2(p, s, α; use_grad_a_q_norms = true)
+    # acc_mags  = antithetic_mean_sac2(p, s, α; use_grad_a_q_norms = true)
 
-    w = q_rank_mask(acc_mags; target_frac=target_frac)
+    # w = q_rank_mask(acc_mags; target_frac=target_frac)
 
-    actor_inds = findall(x -> x<0.5, w)
-    fear_inds = findall(x -> x>=0.5, w)
+    # actor_inds = findall(x -> x<0.5, w)
+    # fear_inds = findall(x -> x>=0.5, w)
 
 
     for i in 1:4
@@ -518,18 +518,19 @@ function on_policy_critic_update(p::SACPolicy2, traj::AbstractTrajectory; whole_
 
             # new experimental loss
 
-            actor_inds = findall(x -> x<0.5, w)
-            fear_inds = findall(x -> x>=0.5, w)
+            # actor_inds = findall(x -> x<0.5, w)
+            # fear_inds = findall(x -> x>=0.5, w)
 
-            if (length(actor_inds) / length(w)) - target_frac > 0.05
-                @show length(actor_inds) / length(w)
-            end
+            # if (length(actor_inds) / length(w)) - target_frac > 0.05
+            #     @show length(actor_inds) / length(w)
+            # end
 
             #reward = mean(q[actor_inds])
             #entropy = mean(logp_π[actor_inds])
 
-            fear_term = p.fear_factor * mean(KLs[fear_inds])
-            #fear_term = p.fear_factor * mean((μ .- μ_before).^2) # only mean value
+            # fear_term = p.fear_factor * mean(KLs[fear_inds])
+            # fear_term = p.fear_factor * mean((μ .- μ_before).^2) # only mean value
+            fear_term = p.fear_factor * mean(KLs)
 
             #@show target_frac, length(actor_inds), length(fear_inds)
 
