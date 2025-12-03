@@ -530,7 +530,11 @@ function on_policy_critic_update(p::SACPolicy2, traj::AbstractTrajectory; whole_
 
             # fear_term = p.fear_factor * mean(KLs[fear_inds])
             # fear_term = p.fear_factor * mean((μ .- μ_before).^2) # only mean value
-            fear_term = p.fear_factor * mean(KLs)
+            if p.target_frac != 1.0f0
+                fear_term = p.fear_factor * mean(KLs)
+            else
+                fear_term = 0.0f0
+            end
 
             #@show target_frac, length(actor_inds), length(fear_inds)
 

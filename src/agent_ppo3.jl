@@ -1158,7 +1158,7 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
             old_v2 = vec(critic2_values)[inds]
 
             tether = mean((vec(mean_c2)[inds]).^2)
-            zero_mean_tether_factor = 10.8
+            zero_mean_tether_factor = 0.8
 
             critic2_input = p.critic2_takes_action ? vcat(s, a) : s
 
