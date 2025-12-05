@@ -6,7 +6,7 @@ Base.@kwdef mutable struct PPOPolicy3{A,D,R} <: AbstractPolicy
     clip_range::Float32 = 0.2f0
     clip_range_vf::Union{Nothing,Float32} = 0.2f0
     n_microbatches::Int = 1
-    actorbatch_size::Int = 32
+    actorbatch_size = nothing
     n_epochs::Int = 5
     actor_loss_weight = 1.0f0
     critic_loss_weight = 0.5f0
@@ -39,6 +39,12 @@ Base.@kwdef mutable struct PPOPolicy3{A,D,R} <: AbstractPolicy
     use_whole_delta_targets::Bool = false
     C2bar = nothing
     critic3_trajectory = nothing
+
+    antithetic_mean_samples = 4
+    zero_mean_tether_factor = 0.8f0
+
+    verbose = true
+
     last_action_log_prob::Vector{Float32} = [0.0f0]
     last_sigma::Vector{Float32} = [0.0f0]
     last_mu::Vector{Float32} = [0.0f0]
@@ -86,7 +92,7 @@ ResMLPBlock(width::Int) = ResMLPBlock(
 
 
 
-function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=100, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 0.1, fear_scale = 0.4, new_loss = true, dist = Normal, critic_frozen_update_freq = 4, actor_update_freq = 1, critic2_takes_action = true, use_popart = false, critic_frozen_factor = 0.1f0, λ_targets = 0.7f0, n_targets = 100, use_critic3 = false, use_exploration_module = false, use_whole_delta_targets = false, )
+function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=nothing, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 0.1, fear_scale = 0.4, new_loss = true, dist = Normal, critic_frozen_update_freq = 4, actor_update_freq = 1, critic2_takes_action = true, use_popart = false, critic_frozen_factor = 0.1f0, λ_targets = 0.7f0, n_targets = 100, use_critic3 = false, use_exploration_module = false, use_whole_delta_targets = false, antithetic_mean_samples = 4, zero_mean_tether_factor = 0.8f0, verbose = true, )
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -205,6 +211,11 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
             use_whole_delta_targets = use_whole_delta_targets,
             C2bar = C2bar,
             critic3_trajectory = critic3_trajectory,
+
+            verbose = verbose,
+
+            antithetic_mean_samples = antithetic_mean_samples,
+            zero_mean_tether_factor = zero_mean_tether_factor,
         ),
         trajectory = 
         CircularArrayTrajectory(;
@@ -837,7 +848,7 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
 
             gae_deltas = critic2_values - offsets
         else
-            mean_c2 = antithetic_mean(AC.actor, AC.critic2, states_flatten_on_host)
+            mean_c2 = antithetic_mean(AC.actor, AC.critic2, states_flatten_on_host; K = p.antithetic_mean_samples)
 
             gae_deltas = critic2_values - mean_c2
         end
@@ -943,7 +954,11 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
             inds = rand_inds[(i-1)*microbatch_size+1:i*microbatch_size]
 
             #inds_actor = collect(rand_inds_actor[i]:rand_inds_actor[i]+actorbatch_size-1)
-            inds_actor = inds[1:clamp(actorbatch_size, 1, length(inds))]
+            if isnothing(actorbatch_size)
+                inds_actor = inds
+            else
+                inds_actor = inds[1:clamp(actorbatch_size, 1, length(inds))]
+            end
 
 
             # DRIFT LOG
@@ -1134,7 +1149,7 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
     # end
     # mean_c2 = acc ./ (2*K)
 
-    mean_c2 = antithetic_mean(AC.actor, c2, states_flatten_on_host)
+    mean_c2 = antithetic_mean(AC.actor, c2, states_flatten_on_host; K = p.antithetic_mean_samples)
         
 
     for epoch in 1:n_epochs
@@ -1158,7 +1173,6 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
             old_v2 = vec(critic2_values)[inds]
 
             tether = mean((vec(mean_c2)[inds]).^2)
-            zero_mean_tether_factor = 0.8
 
             critic2_input = p.critic2_takes_action ? vcat(s, a) : s
 
@@ -1176,7 +1190,7 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
 
                 bellman = mean(((tar .- values_pred2) .^ 2))
                 fr_term = mean((values_pred2 .- q_ref[inds]) .^ 2)
-                critic2_loss = bellman + p.critic_frozen_factor * fr_term + zero_mean_tether_factor * tether # .* exp_m[:]
+                critic2_loss = bellman + p.critic_frozen_factor * fr_term + p.zero_mean_tether_factor * tether # .* exp_m[:]
 
 
                 ignore() do
@@ -1233,7 +1247,7 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
         # end
         # mean_c2 = acc ./ (2*K)                            # ≈ E_a C2(s,a)
 
-        mean_c2 = antithetic_mean(AC.actor, c2, states_c3)
+        mean_c2 = antithetic_mean(AC.actor, c2, states_c3; K = p.antithetic_mean_samples)
 
         targets_critic3 = reshape(mean_c2, n_envs, :) .* (1 .- terminal)
 
@@ -1283,7 +1297,9 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
 
     if (p.update_step / p.update_freq) % p.critic_frozen_update_freq == 0
         if update_critic
-            println("CRITIC FROZEN UPDATE")
+            if p.verbose
+                println("CRITIC FROZEN UPDATE")
+            end
             AC.critic_frozen = deepcopy(AC.critic)
             AC.critic2_frozen = deepcopy(AC.critic2)
         end
@@ -1299,25 +1315,28 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
     # mean_logσ_regularization_loss = mean(abs.(logσ_regularization_losses))
     # mean_critic_regularization_loss = mean(abs.(critic_regularization_losses))
     
-    println("---")
-    println("mean actor loss: $(mean_actor_loss)")
-    println("mean critic loss: $(mean_critic_loss)")
-    println("mean critic2 loss: $(mean_critic2_loss)")
-    println("mean entropy loss: $(mean_entropy_loss)")
-    # println("mean logσ regularization loss: $(mean_logσ_regularization_loss)")
-    # println("mean critic regularization loss: $(mean_critic_regularization_loss)")
+    if p.verbose
+        println("---")
+        println("mean actor loss: $(mean_actor_loss)")
+        println("mean critic loss: $(mean_critic_loss)")
+        println("mean critic2 loss: $(mean_critic2_loss)")
+        println("mean entropy loss: $(mean_entropy_loss)")
+        # println("mean logσ regularization loss: $(mean_logσ_regularization_loss)")
+        # println("mean critic regularization loss: $(mean_critic_regularization_loss)")
 
-    q = finalize(collector; p_over_epochs=0.9, weighted=true)
+        q = finalize(collector; p_over_epochs=0.9, weighted=true)
 
-    # q.q_eps   : 0.9-Quantil der (pro Batch) 0.9-Quantile von |r-1|
-    # q.q_adv   : 0.9-Quantil der (pro Batch) 0.9-Quantile von |A|
-    # q.wq_eps  : A-gewichtetes 0.9-Quantil über die Batch-Quantile von |r-1|
+        # q.q_eps   : 0.9-Quantil der (pro Batch) 0.9-Quantile von |r-1|
+        # q.q_adv   : 0.9-Quantil der (pro Batch) 0.9-Quantile von |A|
+        # q.wq_eps  : A-gewichtetes 0.9-Quantil über die Batch-Quantile von |r-1|
 
-    
-    println("0.9-Quantil excitement: $(q.q_adv)")
-    println("weighted 0.9-Quantil |r-1|: $(q.wq_eps)")
+        println("0.9-Quantil excitement: $(q.q_adv)")
+        println("weighted 0.9-Quantil |r-1|: $(q.wq_eps)")
+    end
 
-    if p.adaptive_weights && (p.update_step / p.update_freq) % 4 == 0
+
+
+    if p.adaptive_weights && p.new_loss && (p.update_step / p.update_freq) % 4 == 0
 
         old_fear_factor = deepcopy(p.fear_factor)
 
@@ -1372,5 +1391,7 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
         
     end
 
-    println("---")
+    if p.verbose
+        println("---")
+    end
 end
