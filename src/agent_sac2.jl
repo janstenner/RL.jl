@@ -295,7 +295,7 @@ function adjust_fear_factor(fear_factor, frac_changed; target=0.30f0, up=1.1f0, 
 end
 
 
-function check_state_trees(p)
+function check_state_trees(p::SACPolicy2)
     # just to make sure the state trees are initialized
 
     if isnothing(p.actor_state_tree) || isnothing(p.qnetwork1_state_tree) || isnothing(p.qnetwork2_state_tree)

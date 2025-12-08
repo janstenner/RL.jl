@@ -43,6 +43,9 @@ Base.@kwdef mutable struct PPOPolicy3{A,D,R} <: AbstractPolicy
     antithetic_mean_samples = 4
     zero_mean_tether_factor = 0.8f0
 
+    off_policy_update_freq = 0
+    off_policy_batch_size = 256
+
     verbose = true
 
     last_action_log_prob::Vector{Float32} = [0.0f0]
@@ -92,7 +95,7 @@ ResMLPBlock(width::Int) = ResMLPBlock(
 
 
 
-function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=nothing, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 0.1, fear_scale = 0.4, new_loss = true, dist = Normal, critic_frozen_update_freq = 4, actor_update_freq = 1, critic2_takes_action = true, use_popart = false, critic_frozen_factor = 0.1f0, λ_targets = 0.7f0, n_targets = 100, use_critic3 = false, use_exploration_module = false, use_whole_delta_targets = false, antithetic_mean_samples = 4, zero_mean_tether_factor = 0.8f0, verbose = true, )
+function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=nothing, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 0.1, fear_scale = 0.4, new_loss = true, dist = Normal, critic_frozen_update_freq = 4, actor_update_freq = 1, critic2_takes_action = true, use_popart = false, critic_frozen_factor = 0.1f0, λ_targets = 0.7f0, n_targets = 100, use_critic3 = false, use_exploration_module = false, use_whole_delta_targets = false, antithetic_mean_samples = 4, zero_mean_tether_factor = 0.8f0, verbose = true, trajectory_size = 100_000, off_policy_update_freq = 0, off_policy_batch_size = 256, )
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -115,6 +118,10 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
     end
 
     mm = ModulationModule()
+
+    if off_policy_update_freq == 0
+        trajectory_size = update_freq
+    end
 
     critic = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic, popart = use_popart)
 
@@ -216,10 +223,13 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
 
             antithetic_mean_samples = antithetic_mean_samples,
             zero_mean_tether_factor = zero_mean_tether_factor,
+
+            off_policy_update_freq = off_policy_update_freq,
+            off_policy_batch_size = off_policy_batch_size,
         ),
         trajectory = 
         CircularArrayTrajectory(;
-                capacity = update_freq,
+                capacity = trajectory_size,
                 state = Float32 => (size(state_space)[1], n_envs),
                 action = Float32 => (size(action_space)[1], n_envs),
                 action_log_prob = Float32 => (n_envs),
@@ -381,6 +391,15 @@ function update!(
 )
     length(t) == 0 && return  # in the first update, only state & action are inserted into trajectory
     p.update_step += 1
+
+
+    number_actuators = size(t[:action])[2]
+
+    if p.off_policy_update_freq != 0 && p.update_step % p.off_policy_update_freq == 0
+        inds, batch = pde_sample(p.rng, t, BatchSampler{SARTS}(p.off_policy_batch_size), number_actuators)
+        _update_off_policy!(p, batch)
+    end
+
     if p.update_step % p.update_freq == 0
         _update!(p, t)
     end
@@ -766,6 +785,37 @@ end
 
 
 
+
+function check_state_trees(p::PPOPolicy3)
+    # just to make sure the state trees are initialized
+
+    AC = p.approximator
+
+    reset_optimizers = false #(p.update_step / p.update_freq) % 400 == 0
+    start_optimizers = isnothing(AC.actor_state_tree) || isnothing(AC.sigma_state_tree) || isnothing(AC.critic_state_tree) || isnothing(AC.critic2_state_tree)
+
+    if start_optimizers || reset_optimizers
+        println("________________________________________________________________________")
+        println("Reset Optimizers")
+        println("________________________________________________________________________")
+        AC.actor_state_tree = Flux.setup(AC.optimizer_actor, AC.actor.μ)
+        AC.sigma_state_tree = Flux.setup(AC.optimizer_sigma, AC.actor.logσ)
+        AC.critic_state_tree = Flux.setup(AC.optimizer_critic, AC.critic)
+        AC.critic2_state_tree = Flux.setup(AC.optimizer_critic2, AC.critic2)
+
+        Optimisers.adjust!(AC.critic_state_tree.layers[end]; lambda = 0.0)
+        Optimisers.adjust!(AC.critic2_state_tree.layers[end]; lambda = 0.0)
+
+        if !isnothing(AC.critic3)
+            AC.critic3_state_tree = Flux.setup(AC.optimizer_critic3, AC.critic3)
+            Optimisers.adjust!(AC.critic3_state_tree.layers[end]; lambda = 0.0)
+        end
+    end
+
+    return
+end
+
+
 function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = true, time_step_interval = nothing, microbatch_size = nothing)
 
 
@@ -783,11 +833,12 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
     D = RL.device(AC)
     to_device(x) = send_to_device(D, x)
 
-    n_envs, n_rollout = size(t[:terminal])
+    n_envs, n_trajectory = size(t[:terminal])
+    n_rollout = p.update_freq
 
 
     if isnothing(time_step_interval)
-        global valid_indices = collect(1:n_envs * n_rollout)
+        global valid_indices = collect(n_trajectory-n_rollout+1:n_trajectory)
     else
         # Get indices where time steps fall within the interval
         time_steps = t[:state][end, 1, :]
@@ -807,17 +858,14 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
     actorbatch_size = p.actorbatch_size
 
 
-    n = length(t)
-    states = to_device(t[:state])
-    #next_states = to_device(t[:next_state])
-    actions = to_device(t[:action])
+    n = p.update_freq
+    states = to_device(t[:state][:,:,valid_indices])
+    actions = to_device(t[:action][:,:,valid_indices])
 
-    states_flatten_on_host = flatten_batch(select_last_dim(t[:state], 1:n))
-    #next_states_flatten_on_host = flatten_batch(select_last_dim(t[:next_state], 1:n))
+    states_flatten_on_host = flatten_batch(select_last_dim(t[:state][:,:,valid_indices], 1:n))
 
     values = reshape(send_to_host(AC.critic(flatten_batch(states))), n_envs, :)
 
-    #values = prepare_values(values, t[:terminal])
 
     #mus = AC.actor.μ(states_flatten_on_host)
     #offsets = reshape(send_to_host( AC.critic2( vcat(flatten_batch(states), mus) )) , n_envs, :)
@@ -832,8 +880,8 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
     offset_input = vcat(flatten_batch(states), mus)
     offsets = reshape(send_to_host( AC.critic2( offset_input )) , n_envs, :)
 
-    rewards = collect(to_device(t[:reward]))
-    terminal = collect(to_device(t[:terminal]))
+    rewards = collect(to_device(t[:reward][:,valid_indices]))
+    terminal = collect(to_device(t[:terminal][:,valid_indices]))
 
 
     
@@ -884,9 +932,9 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
     positive_advantage_indices = findall(>(0), vec(advantages))
 
 
-    actions_flatten = flatten_batch(select_last_dim(t[:action], 1:n))
-    action_log_probs = select_last_dim(to_device(t[:action_log_prob]), 1:n)
-    explore_mod = to_device(t[:explore_mod])
+    actions_flatten = flatten_batch(select_last_dim(t[:action][:,:,valid_indices], 1:n))
+    action_log_probs = select_last_dim(to_device(t[:action_log_prob][:,valid_indices]), 1:n)
+    explore_mod = to_device(t[:explore_mod][:,valid_indices])
 
     stop_update = false
 
@@ -897,26 +945,8 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
 
 
 
-    reset_optimizers = (p.update_step / p.update_freq) % 400 == 0
-    start_optimizers = isnothing(AC.actor_state_tree) || isnothing(AC.sigma_state_tree) || isnothing(AC.critic_state_tree) || isnothing(AC.critic2_state_tree)
-
-    if start_optimizers || reset_optimizers
-        println("________________________________________________________________________")
-        println("Reset Optimizers")
-        println("________________________________________________________________________")
-        AC.actor_state_tree = Flux.setup(AC.optimizer_actor, AC.actor.μ)
-        AC.sigma_state_tree = Flux.setup(AC.optimizer_sigma, AC.actor.logσ)
-        AC.critic_state_tree = Flux.setup(AC.optimizer_critic, AC.critic)
-        AC.critic2_state_tree = Flux.setup(AC.optimizer_critic2, AC.critic2)
-
-        Optimisers.adjust!(AC.critic_state_tree.layers[end]; lambda = 0.0)
-        Optimisers.adjust!(AC.critic2_state_tree.layers[end]; lambda = 0.0)
-
-        if !isnothing(AC.critic3)
-            AC.critic3_state_tree = Flux.setup(AC.optimizer_critic3, AC.critic3)
-            Optimisers.adjust!(AC.critic3_state_tree.layers[end]; lambda = 0.0)
-        end
-    end
+    
+    check_state_trees(p)
 
 
     # AC.critic_state_tree = Flux.setup(AC.optimizer_critic, AC.critic)
@@ -924,7 +954,7 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
     # Optimisers.adjust!(AC.critic_state_tree.layers[end]; lambda = 0.0)
     # Optimisers.adjust!(AC.critic2_state_tree.layers[end]; lambda = 0.0)
 
-    next_states = to_device(flatten_batch(t[:next_state]))
+    next_states = to_device(flatten_batch(t[:next_state][:,:,valid_indices]))
 
     v_ref = AC.critic_frozen( flatten_batch(states) )[:] 
 
@@ -946,7 +976,7 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
 
     for epoch in 1:n_epochs
 
-        rand_inds = shuffle!(rng, valid_indices)
+        rand_inds = shuffle!(rng, collect(1:n_samples))
         #rand_inds_actor = shuffle!(rng, Vector(1:n_envs*n_rollout-actorbatch_size))
 
         for i in 1:n_microbatches
@@ -1154,7 +1184,7 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
 
     for epoch in 1:n_epochs
 
-        rand_inds = shuffle!(rng, valid_indices)
+        rand_inds = shuffle!(rng, collect(1:n_samples))
 
         for i in 1:n_microbatches
 
@@ -1393,5 +1423,75 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
 
     if p.verbose
         println("---")
+    end
+end
+
+
+function _update_off_policy!(p::PPOPolicy3, batch;)
+
+    check_state_trees(p)
+
+    AC = p.approximator
+    γ = p.γ
+    w₂ = p.critic_loss_weight
+
+    D = RL.device(AC)
+    s, a, r, t, next_states = send_to_device(D, batch)
+
+    n_envs = size(t)[1]
+
+    values = reshape(send_to_host(AC.critic(flatten_batch(s))), n_envs, :)
+    next_values = reshape(send_to_host(AC.critic(flatten_batch(next_states))), n_envs, :)
+
+    targets_critic = r + next_values .* γ .* (1 .- t)
+    targets_critic2 = r + next_values .* γ .* (1 .- t) - values
+
+    critic2_input = p.critic2_takes_action ? vcat(flatten_batch(s), flatten_batch(a)) : flatten_batch(s)
+    v_ref = AC.critic_frozen( flatten_batch(s) )[:] 
+    q_ref = AC.critic2_frozen( critic2_input )[:] 
+
+    g_critic = Flux.gradient(AC.critic) do critic
+        v′ = critic(s) |> vec
+
+        values_pred = v′
+
+        
+        bellman = mean(((targets_critic[:] .- values_pred) .^ 2))
+        fr_term = mean((values_pred .- v_ref) .^ 2)
+        critic_loss = bellman + p.critic_frozen_factor * fr_term # .* exp_m[:])
+
+
+        loss = w₂ * critic_loss
+
+        loss
+    end
+    
+    Flux.update!(AC.critic_state_tree, AC.critic, g_critic[1])
+
+    if p.use_popart
+        update!(AC.critic.layers[end], targets_critic[:])
+    end
+
+
+    g_critic2 = Flux.gradient(AC.critic2) do critic2
+        v′ = critic2(critic2_input) |> vec
+
+        values_pred = v′
+
+        
+        bellman = mean(((targets_critic2[:] .- values_pred) .^ 2))
+        fr_term = mean((values_pred .- q_ref) .^ 2)
+        critic2_loss = bellman + p.critic_frozen_factor * fr_term # .* exp_m[:])
+
+
+        loss = w₂ * critic2_loss
+
+        loss
+    end
+    
+    Flux.update!(AC.critic2_state_tree, AC.critic2, g_critic2[1])
+
+    if p.use_popart
+        update!(AC.critic2.layers[end], targets_critic2[:])
     end
 end
