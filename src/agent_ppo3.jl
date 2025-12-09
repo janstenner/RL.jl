@@ -834,7 +834,7 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
     to_device(x) = send_to_device(D, x)
 
     n_envs, n_trajectory = size(t[:terminal])
-    n_rollout = p.update_freq
+    n_rollout = min(p.update_freq, n_trajectory)
 
 
     if isnothing(time_step_interval)
@@ -858,11 +858,10 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
     actorbatch_size = p.actorbatch_size
 
 
-    n = p.update_freq
     states = to_device(t[:state][:,:,valid_indices])
     actions = to_device(t[:action][:,:,valid_indices])
 
-    states_flatten_on_host = flatten_batch(select_last_dim(t[:state][:,:,valid_indices], 1:n))
+    states_flatten_on_host = flatten_batch(select_last_dim(t[:state][:,:,valid_indices], 1:n_samples))
 
     values = reshape(send_to_host(AC.critic(flatten_batch(states))), n_envs, :)
 
@@ -932,8 +931,8 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
     positive_advantage_indices = findall(>(0), vec(advantages))
 
 
-    actions_flatten = flatten_batch(select_last_dim(t[:action][:,:,valid_indices], 1:n))
-    action_log_probs = select_last_dim(to_device(t[:action_log_prob][:,valid_indices]), 1:n)
+    actions_flatten = flatten_batch(select_last_dim(t[:action][:,:,valid_indices], 1:n_samples))
+    action_log_probs = select_last_dim(to_device(t[:action_log_prob][:,valid_indices]), 1:n_samples)
     explore_mod = to_device(t[:explore_mod][:,valid_indices])
 
     stop_update = false
@@ -1253,7 +1252,7 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
         #     pb .= τ .* pb .+ (1f0 - τ) .* p
         # end
 
-        states_c3 = flatten_batch(select_last_dim(p.critic3_trajectory[:state], 1:n))
+        states_c3 = flatten_batch(select_last_dim(p.critic3_trajectory[:state], 1:n_samples))
 
         c2 = AC.critic2 #p.C2bar
 
