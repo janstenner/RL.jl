@@ -4,7 +4,6 @@ Base.@kwdef mutable struct FlowPPOPolicy{A,D,R} <: AbstractPolicy
     γ::Float32 = 0.99f0
     λ::Float32 = 0.99f0
     clip_range::Float32 = 0.2f0
-    clip_range_vf::Union{Nothing,Float32} = 0.2f0
     n_microbatches::Int = 1
     actorbatch_size = nothing
     n_epochs::Int = 5
@@ -126,10 +125,10 @@ end
 # x_t = (1-t)*x0 + t*x1, target u = x1 - x0 (constant)
 # -------------------------
 function fm_loss(fm::FlowMatchNet, s::AbstractMatrix, a::AbstractMatrix, y::AbstractMatrix; rng=Random.default_rng())
-    B = size(y, 2)
+    B = size(y)
     ctx = vcat(s, a)                         # (n+m,B)
-    x0  = randn(rng, Float32, 1, B)          # noise
-    t   = rand(rng, Float32, 1, B)           # Uniform[0,1]
+    x0  = randn(rng, Float32, 1, B[2:end]...)          # noise
+    t   = rand(rng, Float32, 1, B[2:end]...)           # Uniform[0,1]
     x1  = Float32.(y)                        # data (1,B)
     x_t = (1 .- t) .* x0 .+ t .* x1
     u   = x1 .- x0
@@ -167,7 +166,7 @@ end
 
 
 
-function create_agent_flow_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=nothing, normalize_advantage = true, logσ_is_network = true, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, dist = Normal, actor_update_freq = 1, use_popart = false, λ_targets = 0.7f0, n_targets = 100, use_exploration_module = false, antithetic_mean_samples = 4, verbose = true, trajectory_size = 100_000, off_policy_update_freq = 0, off_policy_batch_size = 256, )
+function create_agent_flow_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=nothing, normalize_advantage = true, logσ_is_network = true, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, noise = nothing, noise_scale = 90, dist = Normal, actor_update_freq = 1, use_popart = false, λ_targets = 0.7f0, n_targets = 100, use_exploration_module = false, antithetic_mean_samples = 4, verbose = true, trajectory_size = 100_000, off_policy_update_freq = 0, off_policy_batch_size = 256, )
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -216,7 +215,6 @@ function create_agent_flow_ppo(;action_space, state_space, use_gpu, rng, y, p, u
             γ = y,
             λ = p,
             clip_range = clip_range,
-            clip_range_vf = clip_range_vf,
             n_epochs = n_epochs,
             n_microbatches = n_microbatches,
             actorbatch_size = actorbatch_size,
@@ -563,8 +561,8 @@ function _update!(p::FlowPPOPolicy, t::Any; update_actor = true, update_critic =
 
 
 
-    actions_flatten = flatten_batch(select_last_dim(t[:action][:,:,valid_indices], 1:n_samples))
-    action_log_probs = select_last_dim(to_device(t[:action_log_prob][:,valid_indices]), 1:n_samples)
+    actions_flatten = flatten_batch(t[:action][:,:,valid_indices])
+    action_log_probs = to_device(t[:action_log_prob][:,valid_indices])
     explore_mod = to_device(t[:explore_mod][:,valid_indices])
 
     stop_update = false
@@ -601,24 +599,6 @@ function _update!(p::FlowPPOPolicy, t::Any; update_actor = true, update_critic =
             end
 
 
-            # DRIFT LOG
-            # Auf Actor-Batch (inds_actor) – nach Vorwärtsrechnungen
-            # A_cent = gae_deltas[inds_actor]
-
-            # mean_A = mean(A_cent)
-            # std_A  = std(A_cent) + 1f-8
-
-            # # Policy-gemittelte Abweichung (billig via μ)
-            # μ      = AC.actor.μ(states_flatten_on_host)
-            # A_mu   = reshape(send_to_host(AC.critic2(vcat(flatten_batch(states), μ))), n_envs, :) .- offsets
-            # E_A    = mean(vec(A_mu)[inds_actor])
-
-            # @info "adv_centered" mean_A=mean_A std_A=std_A E_pi_A=E_A
-
-            #inds = positive_advantage_indices
-
-            # s = to_device(select_last_dim(states_flatten_on_host, inds))
-            # !!! we need to convert it into a continuous CuArray otherwise CUDA.jl will complain scalar indexing
             s = to_device(collect(select_last_dim(states_flatten_on_host, inds)))
             s_actor = to_device(collect(select_last_dim(states_flatten_on_host, inds_actor)))
             a = to_device(collect(select_last_dim(actions_flatten, inds_actor)))
@@ -634,10 +614,7 @@ function _update!(p::FlowPPOPolicy, t::Any; update_actor = true, update_critic =
 
             tar = vec(targets)[inds]
 
-            old_v = vec(values)[inds]
-
             
-
             clamp!(log_p, log(1e-8), Inf) # clamp old_prob to 1e-8 to avoid inf
 
             if p.normalize_advantage
@@ -647,10 +624,6 @@ function _update!(p::FlowPPOPolicy, t::Any; update_actor = true, update_critic =
             # s_neg = sample_negatives_far(s)
 
             g_actor, g_critic = Flux.gradient(AC.actor, AC.critic) do actor, critic
-                v′ = critic(s) |> vec
-
-                # nv′ = AC.critic(ns) |> vec
-                # nv = critic2(vcat(s,a)) |> vec
 
                 μ, logσ = actor(s_actor)
 
@@ -676,36 +649,13 @@ function _update!(p::FlowPPOPolicy, t::Any; update_actor = true, update_critic =
                         stop_update = true
                     end
                 end
-
                 
-                fear = (ratio .- 1).^2 .* p.fear_factor
+                surr1 = ratio .* adv
+                surr2 = clamp.(ratio, 1.0f0 - clip_range, 1.0f0 + clip_range) .* adv
 
+                actor_loss = -mean(min.(surr1, surr2))
 
-                if p.new_loss
-                    actor_loss_values = ((ratio .* adv) - fear)  #.* exp_m[:]
-                    actor_loss = -mean(actor_loss_values)
-                else
-                    surr1 = ratio .* adv
-                    surr2 = clamp.(ratio, 1.0f0 - clip_range, 1.0f0 + clip_range) .* adv
-
-                    actor_loss = -mean(min.(surr1, surr2))
-                end
-
-
-                if isnothing(clip_range_vf) || clip_range_vf == 0.0
-                    values_pred = v′
-                else
-                    # clipped value function loss, from OpenAI SpinningUp implementation
-                    Δ = v′ .- old_v
-                    values_pred = old_v .+ clamp.(Δ, -clip_range_vf, clip_range_vf)
-                end
-
-
-
-                
-                bellman = mean(((tar .- values_pred) .^ 2))
-                fr_term = mean((values_pred .- v_ref[inds]) .^ 2)
-                critic_loss = bellman + p.critic_frozen_factor * fr_term # .* exp_m[:])
+                critic_loss = fm_loss(critic, s, a, tar; rng=p.rng)
 
 
                 loss = w₁ * actor_loss + w₂ * critic_loss - w₃ * entropy_loss 
@@ -716,7 +666,6 @@ function _update!(p::FlowPPOPolicy, t::Any; update_actor = true, update_critic =
                     push!(critic_losses, w₂ * critic_loss)
                     push!(entropy_losses, -w₃ * entropy_loss)
 
-                    update!(collector, ratio, adv; p=0.9, within_batch_weighted=true)
                 end
 
                 loss
@@ -725,8 +674,7 @@ function _update!(p::FlowPPOPolicy, t::Any; update_actor = true, update_critic =
             if !stop_update
                 if (p.update_step / p.update_freq) % p.actor_update_freq == 0
                     if update_actor
-                        Flux.update!(AC.actor_state_tree, AC.actor.μ, g_actor.μ)
-                        Flux.update!(AC.sigma_state_tree, AC.actor.logσ, g_actor.logσ)
+                        Flux.update!(AC.actor_state_tree, AC.actor, g_actor)
                     end
                 end
                 if update_critic
@@ -736,9 +684,6 @@ function _update!(p::FlowPPOPolicy, t::Any; update_actor = true, update_critic =
                 break
             end
 
-            if p.use_popart && update_critic
-                update!(AC.critic.layers[end], tar)
-            end
 
         end
 
@@ -747,207 +692,7 @@ function _update!(p::FlowPPOPolicy, t::Any; update_actor = true, update_critic =
         end
     end
 
-    #critic2_input = p.critic2_takes_action ? vcat(next_states, AC.actor.μ(next_states)) : next_states
-    #next_critic2_values = reshape( AC.critic2( critic2_input ), n_envs, :)
-    #targets_critic2 = lambda_truncated_targets_ppo3(rewards, terminal, next_values, γ)[:]
-    values = reshape( AC.critic( states ), n_envs, :)
-    next_values = reshape( AC.critic( next_states ), n_envs, :)
-    #targets_critic2 = special_targets_ppo3(rewards, terminal, values, next_values, γ)[:]
-    #@show size(rewards), size(terminal), size(values), size(next_values)
-
-
-
-    if p.use_whole_delta_targets
-        #@show size(rewards), size(terminal), size(values), size(next_values)
-        targets_critic2 = rewards + next_values .* γ .* (1 .- terminal) - values
-    else
-        #targets_critic2 = td_lambda_targets_ppo3(rewards, terminal, values, next_values, γ; λ = p.λ_targets)[:]
-        targets_critic2 = next_values .* (1 .- terminal)
-    end
-
-
-    # critic 2 zero mean tether
-
-    c2 = AC.critic2 #p.C2bar
-
-    # K    = 16 #p.baseline_mc_samples   # z.B. 4 oder 8
-    # μ, ℓσ   = AC.actor(states_flatten_on_host)
-
-    # Σ = exp.(ℓσ)
-
-    # acc  = zeros(Float32, size(targets_critic2))  # [act_dim, batch]
-    # for k in 1:K
-    #     ϵ   = randn(Float32, size(μ))
-
-    #     a_plus  = μ .+ Σ .* ϵ
-    #     a_minus = μ .- Σ .* ϵ
-
-    #     y_plus  = send_to_host(c2(vcat(states_flatten_on_host, a_plus)))
-    #     y_minus = send_to_host(c2(vcat(states_flatten_on_host, a_minus)))
-
-    #     acc .+= (y_plus .+ y_minus)
-    # end
-    # mean_c2 = acc ./ (2*K)
-
-    mean_c2 = antithetic_mean(AC.actor, c2, states_flatten_on_host; K = p.antithetic_mean_samples)
-        
-
-    for epoch in 1:n_epochs
-
-        rand_inds = shuffle!(rng, collect(1:n_samples))
-
-        for i in 1:n_microbatches
-
-            inds = rand_inds[(i-1)*microbatch_size+1:i*microbatch_size]
-
-            s = to_device(collect(select_last_dim(states_flatten_on_host, inds)))
-            a = to_device(collect(select_last_dim(actions_flatten, inds)))
-
-            # nv′ = vec(next_values)[inds]
-            # rew = vec(rewards)[inds]
-            # ter = vec(terminal)[inds]
-
-            #tar = rew + γ * nv′ .* (1 .- ter)
-            tar = vec(targets_critic2)[inds]
-
-            old_v2 = vec(critic2_values)[inds]
-
-            tether = mean((vec(mean_c2)[inds]).^2)
-
-            critic2_input = p.critic2_takes_action ? vcat(s, a) : s
-
-            g_critic2 = Flux.gradient(AC.critic2) do critic2
-                v2′ = critic2(critic2_input) |> vec
-
-                if isnothing(clip_range_vf) || clip_range_vf == 0.0
-                    values_pred2 = v2′
-                else
-                    # clipped value function loss, from OpenAI SpinningUp implementation
-                    Δ = v2′ .- old_v2
-                    values_pred2 = old_v2 .+ clamp.(Δ, -clip_range_vf, clip_range_vf)
-                end
-
-
-                bellman = mean(((tar .- values_pred2) .^ 2))
-                fr_term = mean((values_pred2 .- q_ref[inds]) .^ 2)
-                critic2_loss = bellman + p.critic_frozen_factor * fr_term + p.zero_mean_tether_factor * tether # .* exp_m[:]
-
-
-                ignore() do
-                    push!(critic2_losses, w₂ * critic2_loss)
-                end
-
-                loss = w₂ * critic2_loss
-
-                loss
-            end
-
-            if update_critic
-                Flux.update!(AC.critic2_state_tree, AC.critic2, g_critic2[1])
-
-                if p.use_popart
-                    update!(AC.critic2.layers[end], tar) 
-                end
-            end
-
-        end
-    end
-
-
-    if !isnothing(AC.critic3)
-
-        # don't use target c2 for now
-
-        # τ = 0.99
-        # for (pb, p) in zip(Flux.params(p.C2bar), Flux.params(AC.critic2))
-        #     pb .= τ .* pb .+ (1f0 - τ) .* p
-        # end
-
-        states_c3 = flatten_batch(select_last_dim(p.critic3_trajectory[:state], 1:n_samples))
-
-        c2 = AC.critic2 #p.C2bar
-
-        # K    = 16 #p.baseline_mc_samples   # z.B. 4 oder 8
-        # μ, ℓσ   = AC.actor(states_c3)
-
-        # Σ = exp.(ℓσ)
-
-        # acc  = zeros(Float32, 1, size(μ)[2]) 
-
-        # for k in 1:K
-        #     ϵ   = randn(Float32, size(μ))
-
-        #     a_plus  = μ .+ Σ .* ϵ
-        #     a_minus = μ .- Σ .* ϵ
-
-        #     y_plus  = send_to_host(c2(vcat(states_c3, a_plus)))
-        #     y_minus = send_to_host(c2(vcat(states_c3, a_minus)))
-
-        #     acc .+= (y_plus .+ y_minus)
-        # end
-        # mean_c2 = acc ./ (2*K)                            # ≈ E_a C2(s,a)
-
-        mean_c2 = antithetic_mean(AC.actor, c2, states_c3; K = p.antithetic_mean_samples)
-
-        targets_critic3 = reshape(mean_c2, n_envs, :) .* (1 .- terminal)
-
-        #targets_critic3 = rewards + γ * critic2_values .* (1 .- terminal) - values
-
-        for epoch in 1:n_epochs
-
-            rand_inds = shuffle!(rng, Vector(1:size(states_c3)[2]))
-
-            for i in 1:n_microbatches
-
-                inds = rand_inds[(i-1)*microbatch_size+1:i*microbatch_size]
-
-                s = to_device(collect(select_last_dim(states_c3, inds)))
-
-                tar = vec(targets_critic3)[inds]
-
-                critic3_input = s
-
-                g_critic3 = Flux.gradient(AC.critic3) do critic3
-                    v3′ = critic3(critic3_input) |> vec
-
-                    values_pred3 = v3′
-
-                    bellman = mean(((tar .- values_pred3) .^ 2))
-                    critic3_loss = bellman
-
-                    loss = w₂ * critic3_loss
-
-                    loss
-                end
-
-                if update_critic
-                    Flux.update!(AC.critic3_state_tree, AC.critic3, g_critic3[1])
-
-                    if p.use_popart
-                        update!(AC.critic3.layers[end], tar)
-                    end
-                end
-
-            end
-        end
-    end
-
-
-    #println(p.update_step / p.update_freq)
-
-    if (p.update_step / p.update_freq) % p.critic_frozen_update_freq == 0
-        if update_critic
-            if p.verbose
-                println("CRITIC FROZEN UPDATE")
-            end
-            AC.critic_frozen = deepcopy(AC.critic)
-            AC.critic2_frozen = deepcopy(AC.critic2)
-        end
-    end
-
-
-    # everything here is just magnitude (abs), not real mean
-
+    
     mean_actor_loss = mean(abs.(actor_losses))
     mean_critic_loss = mean(abs.(critic_losses))
     mean_critic2_loss = mean(abs.(critic2_losses))
