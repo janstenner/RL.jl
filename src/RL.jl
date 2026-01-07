@@ -63,7 +63,7 @@ include("./agent_ppo3.jl")
 include("./agent_flowppo.jl")
 include("./agent_sac.jl")
 include("./agent_sac2.jl")
-#include("./agent_mat.jl")
+include("./agent_mat.jl")
 #include("./agent_matmix.jl")
 
 

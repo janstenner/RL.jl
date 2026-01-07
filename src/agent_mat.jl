@@ -129,6 +129,16 @@ Flux.@layer MATEncoder trainable=(embedding, position_encoding, ln, dropout, blo
 
 function (m::MATEncoder)(x)
 
+    # zero-copy: (dm, N) -> (dm, N, 1), run, then back
+    @inline function run_blocks(blocks, x::AbstractMatrix)
+        x3 = reshape(x, size(x,1), size(x,2), 1)          # (dm, N, 1)
+        y3 = blocks(x3)                                   # (dm, N, 1)
+        return reshape(y3, size(y3,1), size(y3,2))         # (dm, N)
+    end
+
+    # already batched: do nothing
+    @inline run_blocks(blocks, x::AbstractArray{T,3}) where {T} = blocks(x)
+
     if m.useSeparateValueChain
         vv = m.embedding_v(x)
     end
@@ -143,7 +153,7 @@ function (m::MATEncoder)(x)
 
     x = m.dropout(x)                # (dm, N, B)
 
-    rep = m.blocks(x)     # (dm, N, B)
+    rep = run_blocks(m.blocks, x)     # (dm, N, B)
 
     if m.useSeparateValueChain
         if m.jointPPO
@@ -154,7 +164,7 @@ function (m::MATEncoder)(x)
             end
 
             vv = m.dropout_v(vv)                # (dm, N, B)
-            vv = m.blocks_v(vv)     # (dm, N, B)
+            vv = run_blocks(m.blocks_v, vv)     # (dm, N, B)
 
             sr = size(vv)
             v = m.head( reshape(vv, sr[1]*sr[2], sr[3]) ) 
@@ -168,7 +178,7 @@ function (m::MATEncoder)(x)
             end
 
             vv = m.dropout_v(vv)                # (dm, N, B)
-            vv = m.blocks_v(vv)     # (dm, N, B)
+            vv = run_blocks(m.blocks_v, vv)     # (dm, N, B)
             v = m.head(vv)       # (1, N, B)
         end
     else
@@ -206,6 +216,18 @@ end
 Flux.@layer MATDecoder trainable=(embedding, position_encoding, ln, dropout, blocks, head, logσ)
 
 function (m::MATDecoder)(x, obs_rep)
+
+    # zero-copy: (dm, N) -> (dm, N, 1), run, then back
+    @inline function run_blocks(blocks, x::AbstractMatrix, obs_rep::AbstractMatrix)
+        x3 = reshape(x, size(x,1), size(x,2), 1)          # (dm, N, 1)
+        obs_rep3 = reshape(obs_rep, size(obs_rep,1), size(obs_rep,2), 1)          # (dm, N, 1)
+        y3 = blocks(x3, obs_rep3)                                   # (dm, N, 1)
+        return reshape(y3, size(y3,1), size(y3,2))         # (dm, N)
+    end
+
+    # already batched: do nothing
+    @inline run_blocks(blocks, x::AbstractArray{T,3}, obs_rep::AbstractArray{T,3}) where {T} = blocks(x, obs_rep)
+
     x = m.embedding(x)              # (dm, N, B)
     N = size(x, 2)
     x = x .+ m.position_encoding(1:N) # (dm, N, B)
@@ -217,7 +239,7 @@ function (m::MATDecoder)(x, obs_rep)
 
     x = m.dropout(x)                # (dm, N, B)
 
-    x = m.blocks(x, obs_rep)     # (dm, N, B)
+    x = run_blocks(m.blocks, x, obs_rep)     # (dm, N, B)
 
     x = m.head(x)                   # (1, N, B)
 
@@ -351,7 +373,7 @@ end
 
 (embed::ZeroEncoding)(x) = zeros(Float32, embed.hidden_size, length(x))
 
-function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = leakyrelu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false, customCrossAttention = true, one_by_one_training = false, clip_range = 0.2f0, tanh_end = true, positional_encoding = 1)
+function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = leakyrelu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false, customCrossAttention = true, one_by_one_training = false, clip_range = 0.2f0, tanh_end = true, positional_encoding = 1, useSeparateValueChain = false)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -402,6 +424,20 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
 
     encoder_blocks = Chain(ntuple(_ -> MATEncoderBlock(dim_model, head_num, head_dim, ffn_dim; pdrop=drop_out), block_num)...)
 
+    if useSeparateValueChain
+        embedding_v = Dense(ns, dim_model, relu, bias = false)
+        position_encoding_v = position_encoding_encoder
+        ln_v = LayerNorm(dim_model)
+        dropout_v = Dropout(drop_out)
+        encoder_blocks_v = Chain(ntuple(_ -> TransformerBlock(dim_model, head_num, head_dim, ffn_dim; dropout=drop_out), block_num)...)
+    else
+        embedding_v = nothing
+        position_encoding_v = nothing
+        ln_v = nothing
+        dropout_v = nothing
+        encoder_blocks_v = nothing
+    end
+
     if positional_encoding == 1
         position_encoding_encoder = SinCosPositionEmbed(dim_model)
         position_encoding_decoder = SinCosPositionEmbed(dim_model)
@@ -419,13 +455,17 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
         ln = LayerNorm(dim_model),
         dropout = Dropout(drop_out),
         blocks = encoder_blocks,
-        embedding_v = Dense(ns, dim_model, relu, bias = false),
-        position_encoding_v = position_encoding_encoder,
-        ln_v = LayerNorm(dim_model),
-        dropout_v = Dropout(drop_out),
-        blocks_v = Transformer(TransformerBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out),
+
+        embedding_v = embedding_v,
+        position_encoding_v = position_encoding_v,
+        ln_v = ln_v,
+        dropout_v = dropout_v,
+        blocks_v = encoder_blocks_v,
+
         head = head_encoder,
+
         jointPPO = jointPPO,
+        useSeparateValueChain = useSeparateValueChain,
     )
 
     decoder = MATDecoder(
