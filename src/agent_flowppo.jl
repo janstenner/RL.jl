@@ -23,7 +23,6 @@ Base.@kwdef mutable struct FlowPPOPolicy{A,D,R} <: AbstractPolicy
     noise_sampler = nothing
     noise_scale = 90.0
     noise_step = 0
-    use_popart::Bool = false
     λ_targets = 0.7f0
     n_targets = 100
     mm = ModulationModule()
@@ -67,7 +66,7 @@ time_embed(t; L=16)
 t: (1, B) Float32 matrix with values in [0,1]
 returns: (2L, B) embedding
 """
-function time_embed(t::AbstractMatrix{<:Real}; L::Int=16)
+function time_embed(t::AbstractArray{<:Real}; L::Int=16)
     t32 = Float32.(t)                      # (1,B)
     freqs = reshape(TWO_PI .* Float32.(1:L), L, 1)  # (L,1)
     ang = freqs .* t32                      # (L,B)
@@ -81,27 +80,25 @@ end
 struct FlowMatchNet
     ctx_net
     trunk
-    head
     time_L::Int
 end
 
 Flux.@layer FlowMatchNet
 
-function FlowMatchNet(n::Int, m::Int; ctx_dim::Int=64, hidden::Int=128, k::Int=64, time_L::Int=16)
+function FlowMatchNet(n::Int, m::Int; ctx_dim::Int=64, hidden::Int=128, k::Int=1, time_L::Int=16)
     ctx_in = n + m
     ctx_net = Chain(
         Dense(ctx_in, ctx_dim, gelu),
         Dense(ctx_dim, ctx_dim, gelu),
     )
     # input: x_t (1) + t_emb (2*time_L) + ctx_emb (ctx_dim)
-    in_dim = 1 + 2*time_L + ctx_dim
+    in_dim = k + 2*time_L + ctx_dim
     trunk = Chain(
         Dense(in_dim, hidden, gelu),
         Dense(hidden, hidden, gelu),
-        Dense(hidden, k, gelu),   # "flow token" of dim k
+        Dense(hidden, k),   
     )
-    head = Dense(k, 1)            # linear projection k -> 1
-    return FlowMatchNet(ctx_net, trunk, head, time_L)
+    return FlowMatchNet(ctx_net, trunk, time_L)
 end
 
 """
@@ -115,8 +112,7 @@ function (fm::FlowMatchNet)(x_t, t, ctx)
     t_emb  = time_embed(t; L=fm.time_L)     # (2L,B)
     c_emb  = fm.ctx_net(ctx)                # (ctx_dim,B)
     h_in   = vcat(x_t, t_emb, c_emb)        # (1+2L+ctx_dim, B)
-    token  = fm.trunk(h_in)                 # (k,B)
-    v      = fm.head(token)                 # (1,B)
+    v  = fm.trunk(h_in)                 # (k,B)              # (1,B)
     return v
 end
 
@@ -124,8 +120,9 @@ end
 # Flow-matching loss (Rectified Flow / straight path)
 # x_t = (1-t)*x0 + t*x1, target u = x1 - x0 (constant)
 # -------------------------
-function fm_loss(fm::FlowMatchNet, s::AbstractMatrix, a::AbstractMatrix, y::AbstractMatrix; rng=Random.default_rng())
-    B = size(y)
+function fm_loss(fm::FlowMatchNet, s::AbstractArray, a::AbstractArray, y::AbstractArray; rng=Random.default_rng())
+    B = size(s)
+
     ctx = vcat(s, a)                         # (n+m,B)
     x0  = randn(rng, Float32, 1, B[2:end]...)          # noise
     t   = rand(rng, Float32, 1, B[2:end]...)           # Uniform[0,1]
@@ -141,20 +138,20 @@ end
 # Sampling (midpoint / RK2): more stable than Euler
 # returns samples ŷ (1,B)
 # -------------------------
-function sample_midpoint(fm::FlowMatchNet, s::AbstractMatrix, a::AbstractMatrix;
-                          steps::Int=50, rng=Random.default_rng(), x0=nothing)
+function sample_midpoint(fm::FlowMatchNet, s::AbstractArray, a::AbstractArray;
+                          steps::Int=30, rng=Random.default_rng(), x0=nothing)
     B = size(s)
     ctx = vcat(s, a)
-    x = isnothing(x0) ? randn(rng, Float32, 1, B[2:end]...) : x0
+    x = isnothing(x0) ? randn(rng, Float32, 1, B[2:end]...) : deepcopy(x0)
     dt = 1f0 / Float32(steps)
 
     for k in 1:steps
         t = Float32((k-1) / steps)
-        tmat = fill(t, 1, B)
+        tmat = fill(t, 1, B[2:end]...)
         v = fm(x, tmat, ctx)
 
         t_mid = t + 0.5f0 * dt
-        tmidmat = fill(t_mid, 1, B)
+        tmidmat = fill(t_mid, 1, B[2:end]...)
         x_mid = x .+ (0.5f0 * dt) .* v
         v_mid = fm(x_mid, tmidmat, ctx)
 
@@ -166,7 +163,7 @@ end
 
 
 
-function create_agent_flow_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=nothing, normalize_advantage = true, logσ_is_network = true, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, noise = nothing, noise_scale = 90, dist = Normal, actor_update_freq = 1, use_popart = false, λ_targets = 0.7f0, n_targets = 100, use_exploration_module = false, antithetic_mean_samples = 4, verbose = true, trajectory_size = 100_000, off_policy_update_freq = 0, off_policy_batch_size = 256, )
+function create_agent_flow_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=nothing, normalize_advantage = true, logσ_is_network = true, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, noise = nothing, noise_scale = 90, dist = Normal, actor_update_freq = 1, λ_targets = 0.7f0, n_targets = 100, use_exploration_module = false, antithetic_mean_samples = 4, verbose = true, trajectory_size = 100_000, off_policy_update_freq = 0, off_policy_batch_size = 256, )
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -232,7 +229,6 @@ function create_agent_flow_ppo(;action_space, state_space, use_gpu, rng, y, p, u
             noise = noise,
             noise_sampler = noise_sampler,
             noise_scale = noise_scale,
-            use_popart = use_popart,
             λ_targets = λ_targets,
             n_targets = n_targets,
             mm = mm,
@@ -267,7 +263,7 @@ end
 
 
 function prob(
-    p::FlowPPOPolicy{<:ActorCritic3{<:GaussianNetwork},Normal},
+    p::FlowPPOPolicy{<:FlowActorCritic{<:GaussianNetwork},Normal},
     state::AbstractArray,
     mask,
 )
@@ -276,7 +272,7 @@ function prob(
     StructArray{Normal}((μ, exp.(logσ)))
 end
 
-function prob(p::FlowPPOPolicy{<:ActorCritic3,Categorical}, state::AbstractArray, mask)
+function prob(p::FlowPPOPolicy{<:FlowActorCritic,Categorical}, state::AbstractArray, mask)
     logits = p.approximator.actor(send_to_device(device(p.approximator), state))
     if !isnothing(mask)
         logits .+= ifelse.(mask, 0.0f0, typemin(Float32))
@@ -377,13 +373,6 @@ function update!(
         action_log_prob = policy.last_action_log_prob,
         explore_mod = policy.mm.last,
     )
-
-    if !isnothing(policy.critic3_trajectory)
-        push!(
-        policy.critic3_trajectory;
-        state = state(env),
-    )
-    end
 end
 
 
@@ -427,7 +416,7 @@ end
 
 
 
-function approximate_values(p::FlowPPOPolicy, states::AbstractMatrix)
+function approximate_values(p::FlowPPOPolicy, states::AbstractArray)
     AC = p.approximator
 
     values = zeros(Float32, 1, size(states)[2:end]...)
@@ -444,31 +433,40 @@ function approximate_values(p::FlowPPOPolicy, states::AbstractMatrix)
     values
 end
 
-function approximate_deltas(p::FlowPPOPolicy, states::AbstractMatrix, actions::AbstractMatrix)
+function approximate_deltas(p::FlowPPOPolicy, states::AbstractArray, actions::AbstractArray)
     AC = p.approximator
 
     deltas = zeros(Float32, 1, size(states)[2:end]...)
 
-    for i in 1:p.antithetic_mean_samples
+    contexts = p.antithetic_mean_samples
+
+    for i in 1:contexts
         x0 = randn(p.rng, Float32, 1, size(states)[2:end]...)
 
         v = sample_midpoint(AC.critic, states, actions; x0=x0)
 
-        temp_deltas = zeros(Float32, size(deltas)...)
+        #temp_deltas = zeros(Float32, size(deltas)...)
 
         for j in 1:p.antithetic_mean_samples
             dist = prob(p, states, nothing)
             temp_actions = rand.(p.rng, dist)
             temp_v = sample_midpoint(AC.critic, states, temp_actions; x0=x0)
 
-            temp_deltas += v .- temp_v
-        end
-        temp_deltas ./= p.antithetic_mean_samples
+            temp_deltas = v .- temp_v
 
-        deltas .+= temp_deltas
+            indices = findall(i -> abs(temp_deltas[i]) > abs(deltas[i]), eachindex(temp_deltas))
+
+            deltas[indices] = temp_deltas[indices]
+
+            # @show v, temp_v, temp_deltas
+            # error("stop")
+        end
+        #temp_deltas ./= p.antithetic_mean_samples
+
+        #deltas .+= temp_deltas
     end
 
-    deltas ./= p.antithetic_mean_samples
+    #deltas ./= p.antithetic_mean_samples
 
     deltas
 end
@@ -489,7 +487,7 @@ function check_state_trees(p::FlowPPOPolicy)
         AC.actor_state_tree = Flux.setup(AC.optimizer_actor, AC.actor)
         AC.critic_state_tree = Flux.setup(AC.optimizer_critic, AC.critic)
 
-        Optimisers.adjust!(AC.critic_state_tree.layers[end]; lambda = 0.0)
+        #Optimisers.adjust!(AC.critic_state_tree.layers[end]; lambda = 0.0)
     end
 
     return
@@ -506,7 +504,6 @@ function _update!(p::FlowPPOPolicy, t::Any; update_actor = true, update_critic =
     n_epochs = p.n_epochs
     n_microbatches = p.n_microbatches
     clip_range = p.clip_range
-    clip_range_vf = p.clip_range_vf
     w₁ = p.actor_loss_weight
     w₂ = p.critic_loss_weight
     w₃ = p.entropy_loss_weight
@@ -579,9 +576,7 @@ function _update!(p::FlowPPOPolicy, t::Any; update_actor = true, update_critic =
 
     next_states = to_device(flatten_batch(t[:next_state][:,:,valid_indices]))
     next_values = approximate_values(p, next_states)
-    targets = td_lambda_targets(rewards, terminal, next_values, γ; λ = p.λ_targets)[:]
-    
-
+    targets = td_lambda_targets(rewards, terminal, next_values, γ; λ = p.λ_targets)
     
 
     for epoch in 1:n_epochs
@@ -612,7 +607,7 @@ function _update!(p::FlowPPOPolicy, t::Any; update_actor = true, update_critic =
             log_p = vec(action_log_probs)[inds_actor]
             adv = vec(advantages)[inds_actor]
 
-            tar = vec(targets)[inds]
+            tar = targets[:,inds]
 
             
             clamp!(log_p, log(1e-8), Inf) # clamp old_prob to 1e-8 to avoid inf
@@ -724,25 +719,17 @@ function _update_off_policy!(p::FlowPPOPolicy, batch;)
 
     n_envs = size(t)[1]
 
-    values = reshape(send_to_host(AC.critic(flatten_batch(s))), n_envs, :)
-    next_values = reshape(send_to_host(AC.critic(flatten_batch(next_states))), n_envs, :)
+    next_values = approximate_values(p, flatten_batch(next_states))
+
+    a = flatten_batch(a)
+    s = flatten_batch(s)
 
     targets_critic = r + next_values .* γ .* (1 .- t)
-    targets_critic2 = r + next_values .* γ .* (1 .- t) - values
 
-    critic2_input = p.critic2_takes_action ? vcat(flatten_batch(s), flatten_batch(a)) : flatten_batch(s)
-    v_ref = AC.critic_frozen( flatten_batch(s) )[:] 
-    q_ref = AC.critic2_frozen( critic2_input )[:] 
 
     g_critic = Flux.gradient(AC.critic) do critic
-        v′ = critic(s) |> vec
 
-        values_pred = v′
-
-        
-        bellman = mean(((targets_critic[:] .- values_pred) .^ 2))
-        fr_term = mean((values_pred .- v_ref) .^ 2)
-        critic_loss = bellman + p.critic_frozen_factor * fr_term # .* exp_m[:])
+        critic_loss = fm_loss(critic, s, a, targets_critic; rng=p.rng)
 
 
         loss = w₂ * critic_loss
@@ -752,30 +739,4 @@ function _update_off_policy!(p::FlowPPOPolicy, batch;)
     
     Flux.update!(AC.critic_state_tree, AC.critic, g_critic[1])
 
-    if p.use_popart
-        update!(AC.critic.layers[end], targets_critic[:])
-    end
-
-
-    g_critic2 = Flux.gradient(AC.critic2) do critic2
-        v′ = critic2(critic2_input) |> vec
-
-        values_pred = v′
-
-        
-        bellman = mean(((targets_critic2[:] .- values_pred) .^ 2))
-        fr_term = mean((values_pred .- q_ref) .^ 2)
-        critic2_loss = bellman + p.critic_frozen_factor * fr_term # .* exp_m[:])
-
-
-        loss = w₂ * critic2_loss
-
-        loss
-    end
-    
-    Flux.update!(AC.critic2_state_tree, AC.critic2, g_critic2[1])
-
-    if p.use_popart
-        update!(AC.critic2.layers[end], targets_critic2[:])
-    end
 end

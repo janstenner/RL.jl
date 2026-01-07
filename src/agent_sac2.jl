@@ -693,19 +693,26 @@ function update!(p::SACPolicy2, batch::NamedTuple{SARTS})
 
 
     # polyak averaging
-    Functors.fmap(p.target_qnetwork1, p.qnetwork1) do tgt, src
-        if tgt isa AbstractArray && src isa AbstractArray
-            @. tgt = (1 - τ) * tgt + τ * src
-        end
-        tgt
+    for (dest, src) in zip(
+        Flux.params([p.target_qnetwork1, p.target_qnetwork2]),
+        Flux.params([p.qnetwork1, p.qnetwork2]),
+    )
+        dest .= (1 - τ) .* dest .+ τ .* src
     end
 
-    Functors.fmap(p.target_qnetwork2, p.qnetwork2) do tgt, src
-        if tgt isa AbstractArray && src isa AbstractArray
-            @. tgt = (1 - τ) * tgt + τ * src
-        end
-        tgt
-    end
+    # Functors.fmap(p.target_qnetwork1, p.qnetwork1) do tgt, src
+    #     if tgt isa AbstractArray && src isa AbstractArray
+    #         @. tgt = (1 - τ) * tgt + τ * src
+    #     end
+    #     tgt
+    # end
+
+    # Functors.fmap(p.target_qnetwork2, p.qnetwork2) do tgt, src
+    #     if tgt isa AbstractArray && src isa AbstractArray
+    #         @. tgt = (1 - τ) * tgt + τ * src
+    #     end
+    #     tgt
+    # end
 
     if p.use_popart
         # PopArt Polyak

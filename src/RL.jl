@@ -3,6 +3,7 @@ module RL
 
 # imports
 
+using CUDA
 using LinearAlgebra
 using IntervalSets
 using DataFrames
@@ -12,7 +13,6 @@ using StructArrays
 using UnicodePlots:lineplot
 using Flux
 using Optimisers
-using CUDA
 using Adapt
 using Random
 using CircularArrayBuffers
@@ -27,7 +27,6 @@ using ChainRulesCore
 using Static
 using CoherentNoise
 using StatsBase
-using Functors
 
 
 

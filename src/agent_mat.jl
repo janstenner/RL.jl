@@ -150,17 +150,101 @@ end
 
 
 
+
+
+struct MATEncoderBlock{MHA,LN1,LN2,FF,DO}
+    mha::MHA
+    ln1::LN1
+    ln2::LN2
+    ff::FF
+    dropout::DO
+end
+
+function MATEncoderBlock(d_model::Int, nheads::Int, d_ff::Int; pdrop=0.1)
+    MATEncoderBlock(
+        MultiHeadAttention(d_model, nheads=nheads, dropout_prob=pdrop),
+        LayerNorm(d_model),
+        LayerNorm(d_model),
+        Chain(Dense(d_model, d_ff, gelu), Dense(d_ff, d_model)),
+        Dropout(pdrop)
+    )
+end
+
+Flux.@layer MATEncoderBlock trainable=(mha, ln1, ln2, ff)
+
+function (m::MATEncoderBlock)(x)
+    # x: (d_model, T, B)
+    y, _ = m.mha(x, x, x; mask=nothing)   # Self-Attention
+    x = m.ln1(x .+ m.dropout(y))
+    z = m.ff(x)
+    x = m.ln2(x .+ m.dropout(z))
+    return x
+end
+
+
+
+
+struct MATDecoderBlock{MHA1,MHA2,LN1,LN2,LN3,FF,DO}
+    mha1::MHA1
+    mha2::MHA2
+    ln1::LN1
+    ln2::LN2
+    ln3::LN3
+    ff::FF
+    dropout::DO
+    UseCustomCrossAttention::Bool
+end
+
+function MATDecoderBlock(d_model::Int, nheads::Int, d_ff::Int; pdrop=0.1, UseCustomCrossAttention::Bool=false)
+    MATDecoderBlock(
+        MultiHeadAttention(d_model, nheads=nheads, dropout_prob=pdrop),
+        MultiHeadAttention(d_model, nheads=nheads, dropout_prob=pdrop),
+        LayerNorm(d_model),
+        LayerNorm(d_model),
+        LayerNorm(d_model),
+        Chain(Dense(d_model, d_ff, gelu), Dense(d_ff, d_model)),
+        Dropout(pdrop),
+        UseCustomCrossAttention,
+    )
+end
+
+Flux.@layer MATDecoderBlock trainable=(mha1, mha2, ln1, ln2, ln3, ff)
+
+function (m::MATDecoderBlock)(x, obs_rep)
+    # x: (d_model, T, B)
+    mask = NNlib.make_causal_mask(x, dims=2)
+
+    if m.UseCustomCrossAttention
+        y, _ = m.mha1(obs_rep, x, x; mask=mask)
+        x = m.ln1(obs_rep .+ m.dropout(y))
+    else
+        y, _ = m.mha1(x, obs_rep, obs_rep; mask=mask)
+        x = m.ln1(x .+ m.dropout(y))
+    end
+
+    y, _ = m.mha2(x, x, x; mask=mask)
+    x = m.ln2(x .+ m.dropout(y))
+
+    z = m.ff(x)
+    x = m.ln3(x .+ m.dropout(z))
+
+    return x
+end
+
+
+
+
 Base.@kwdef struct MATEncoder
     embedding
     position_encoding
-    nl
+    ln
     dropout
-    block
+    blocks
     embedding_v
     position_encoding_v
-    nl_v
+    ln_v
     dropout_v
-    block_v
+    blocks_v
     head
     jointPPO
 end
@@ -174,23 +258,23 @@ function (st::MATEncoder)(x)
     x = x .+ st.position_encoding(1:N) # (dm, N, B)
 
     if !(iszero(x))
-        x = st.nl(x)
+        x = st.ln(x)
     end
 
     x = st.dropout(x)                # (dm, N, B)
 
-    x = st.block(x, nothing)     # (dm, N, B)
+    x = st.blocks(x, nothing)     # (dm, N, B)
     rep = x[:hidden_state]
 
     if st.jointPPO
         vv = vv .+ st.position_encoding_v(1:N)
 
         if !(iszero(vv))
-            vv = st.nl_v(vv)
+            vv = st.ln_v(vv)
         end
 
         vv = st.dropout_v(vv)                # (dm, N, B)
-        vv = st.block_v(vv, nothing)     # (dm, N, B)
+        vv = st.blocks_v(vv, nothing)     # (dm, N, B)
         vv = vv[:hidden_state]
 
         sr = size(vv)
@@ -201,11 +285,11 @@ function (st::MATEncoder)(x)
         vv = vv .+ st.position_encoding_v(1:N)
         
         if !(iszero(vv))
-            vv = st.nl_v(vv)
+            vv = st.ln_v(vv)
         end
 
         vv = st.dropout_v(vv)                # (dm, N, B)
-        vv = st.block_v(vv, nothing)     # (dm, N, B)
+        vv = st.blocks_v(vv, nothing)     # (dm, N, B)
         v = st.head(vv[:hidden_state])       # (1, N, B)
         #v = st.head(rep)                   # (1, N, B)
     end
@@ -217,9 +301,9 @@ end
 Base.@kwdef struct MATDecoder
     embedding
     position_encoding
-    nl
+    ln
     dropout
-    block
+    blocks
     head
     logσ
     logσ_is_network::Bool = false
@@ -235,13 +319,13 @@ function (st::MATDecoder)(x, obs_rep)
     x = x .+ st.position_encoding(1:N) # (dm, N, B)
 
     if !(iszero(x))
-        x = st.nl(x)
+        x = st.ln(x)
         # x = (x.-mean(x, dims=1))./std(x, dims=1)
     end
 
     x = st.dropout(x)                # (dm, N, B)
 
-    x = st.block(x, obs_rep, Masks.CausalMask(), Masks.CausalMask())     # (dm, N, B)
+    x = st.blocks(x, obs_rep, Masks.CausalMask(), Masks.CausalMask())     # (dm, N, B)
     
     x = x[:hidden_state]
 
@@ -426,9 +510,9 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     end
 
     if customCrossAttention
-        decoder_block = Transformer(CustomTransformerDecoderBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out)
+        decoder_blocks = Transformer(CustomTransformerDecoderBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out)
     else
-        decoder_block = Transformer(TransformerDecoderBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out)
+        decoder_blocks = Transformer(TransformerDecoderBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out)
     end
 
     if positional_encoding == 1
@@ -445,14 +529,14 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     encoder = MATEncoder(
         embedding = Dense(ns, dim_model, relu, bias = false),
         position_encoding = position_encoding_encoder,
-        nl = LayerNorm(dim_model),
+        ln = LayerNorm(dim_model),
         dropout = Dropout(drop_out),
-        block = Transformer(TransformerBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out),
+        blocks = Transformer(TransformerBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out),
         embedding_v = Dense(ns, dim_model, relu, bias = false),
         position_encoding_v = position_encoding_encoder,
-        nl_v = LayerNorm(dim_model),
+        ln_v = LayerNorm(dim_model),
         dropout_v = Dropout(drop_out),
-        block_v = Transformer(TransformerBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out),
+        blocks_v = Transformer(TransformerBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out),
         head = head_encoder,
         jointPPO = jointPPO,
     )
@@ -460,9 +544,9 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     decoder = MATDecoder(
         embedding = Dense(na, dim_model, relu, bias = false),
         position_encoding = position_encoding_decoder,
-        nl = LayerNorm(dim_model),
+        ln = LayerNorm(dim_model),
         dropout = Dropout(drop_out),
-        block = decoder_block,
+        blocks = decoder_blocks,
         head = head_decoder,
         logσ = create_logσ_mat(logσ_is_network = logσ_is_network, ns = dim_model, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, start_logσ = start_logσ),
         logσ_is_network = logσ_is_network,
