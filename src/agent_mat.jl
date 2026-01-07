@@ -1,156 +1,3 @@
-# ----------- Custom CrossAttention for MAT -----------
-
-
-struct CustomCrossAttention{A, Q, KV, O} <: Transformers.Layers.LayerStruct
-    attention_op::A
-    q_proj::Q
-    kv_proj::KV #::NSplit{StaticInt{2}, KV}
-    o_proj::O
-end
-Flux.@functor CustomCrossAttention
-
-function argument_names(ca::CustomCrossAttention)
-    required_names = (:hidden_state, :memory)
-    field_names = invoke(Transformers.Layers.argument_names, Tuple{Transformers.Layers.LayerStruct}, ca)
-    cross_field_names = Transformers.Layers.remove_name(Transformers.Layers.prefix_name(:cross, field_names), :cross_hidden_state)
-    return Base.merge_names(required_names, cross_field_names)
-end
-
-Transformers.Layers.argument_names(ca::CustomCrossAttention) = argument_names(ca)
-
-function (ca::CustomCrossAttention)(nt::NamedTuple)
-    hidden_state, memory = nt.hidden_state, nt.memory
-    cross_attention_mask = ChainRulesCore.ignore_derivatives(()->get(nt, :cross_attention_mask, nothing))
-    nt_ext = Base.structdiff(nt, NamedTuple{(:hidden_state, :memory, :attention_mask, :cross_attention_mask)})
-    q = Transformers.Layers.with_extra(ca.q_proj, memory, nt_ext)
-    kv = Transformers.Layers.with_extra(ca.kv_proj, hidden_state, nt_ext)
-    _a = Transformers.Layers._apply_cross_attention_op(ca.attention_op, q, kv, cross_attention_mask)
-    a = Transformers.Layers.rename(Base.structdiff(_a, NamedTuple{(:attention_mask, :cross_attention_mask)}),
-               Val(:attention_score), Val(:cross_attention_score))
-    y = Transformers.Layers.apply_on_namedtuple(ca.o_proj, a)
-    return merge(nt, y)
-end
-
-
-function CustomCrossAttention(head::Int, hidden_size::Int; dropout = nothing, return_score = false)
-    @assert rem(hidden_size, head) == 0 "`hidden_size` should be dividible by `head` if `head_hidden_size` is not set"
-    head_hidden_size = div(hidden_size, head)
-    return CustomCrossAttention(head, hidden_size, head_hidden_size; dropout, return_score)
-end
-function CustomCrossAttention(head::Int, hidden_size::Int, head_hidden_size::Int; dropout = nothing, return_score = false)
-    cross_atten_op = Transformers.Layers.MultiheadQKVAttenOp(head, dropout)
-    return_score && (cross_atten_op = NeuralAttentionlib.WithScore(cross_atten_op))
-    ca = CustomCrossAttention(cross_atten_op, head, hidden_size, head_hidden_size)
-    return ca
-end
-
-function CustomCrossAttention(cross_atten_op, head::Int, hidden_size::Int, head_hidden_size::Int)
-    c_q_proj = Dense(hidden_size, head * head_hidden_size)
-    c_kv_proj = Dense(hidden_size, 2head * head_hidden_size)
-    c_o_proj = Dense(head * head_hidden_size, hidden_size)
-    ca = CustomCrossAttention(cross_atten_op, c_q_proj, Transformers.Layers.NSplit(static(2), c_kv_proj), c_o_proj)
-    return ca
-end
-
-
-
-struct CustomPostNormResidual{L, N} <: Transformers.Layers.LayerStruct
-    layer::L
-    norm::N
-end
-Flux.@functor CustomPostNormResidual
-
-argument_names(b::CustomPostNormResidual) = argument_names(b.layer.layer)
-argument_names(b::Transformers.Layers.PostNormResidual) = Transformers.Layers.argument_names(b)
-
-function (postnr::CustomPostNormResidual)(nt::NamedTuple)
-    y = Transformers.Layers.apply_on_namedtuple(postnr.layer, nt)
-    #hidden_state = y.hidden_state + nt.hidden_state
-    hidden_state = y.hidden_state + nt.memory      # use memory for residual connection
-    r = Transformers.Layers.return_hidden_state(y, hidden_state)
-    return Transformers.Layers.apply_on_namedtuple(postnr.norm, r)
-end
-
-
-struct CustomTransformerDecoderBlock{A, C, F} <: Transformers.Layers.AbstractTransformerBlock
-    attention::A
-    crossattention::C
-    feedforward::F
-end
-Flux.@functor CustomTransformerDecoderBlock
-
-argument_names(b::CustomTransformerDecoderBlock) = Base.merge_names(
-    Base.merge_names(argument_names(b.crossattention), argument_names(b.attention)),
-    argument_names(b.feedforward)
-)
-
-Transformers.Layers.argument_names(b::CustomTransformerDecoderBlock) = argument_names(b)
-
-(b::CustomTransformerDecoderBlock)(nt::NamedTuple) =
-    Transformers.Layers.apply_on_namedtuple(b.feedforward, Transformers.Layers.apply_on_namedtuple(b.attention, Transformers.Layers.apply_on_namedtuple(b.crossattention, nt)))
-
-
-CustomTransformerDecoderBlock(
-    head::Int, hidden_size::Int, head_hidden_size::Int, intermediate_size::Int;
-    dropout = nothing, attention_dropout = nothing, cross_attention_dropout = nothing,
-    return_score = false, return_self_attention_score = false,
-) = CustomTransformerDecoderBlock(
-    gelu, head, hidden_size, head_hidden_size, intermediate_size;
-    dropout, attention_dropout, cross_attention_dropout, return_score, return_self_attention_score
-)
-
-CustomTransformerDecoderBlock(
-    act, head::Int, hidden_size::Int, head_hidden_size::Int, intermediate_size::Int;
-    dropout = nothing, attention_dropout = nothing, cross_attention_dropout = nothing,
-    return_score = false, return_self_attention_score = false,
-) = PostNormTransformerDecoderBlock(
-    act, head, hidden_size, head_hidden_size, intermediate_size, true;
-    dropout, attention_dropout, cross_attention_dropout, return_score, return_self_attention_score
-)
-
-function PostNormTransformerDecoderBlock(
-    act, head::Int, hidden_size::Int, head_hidden_size::Int, intermediate_size::Int, UseCustomCrossAttention::Bool=true;
-    dropout = nothing, attention_dropout = nothing, cross_attention_dropout = nothing,
-    return_score = false, return_self_attention_score = false,
-)
-    
-    sa = Transformers.Layers.SelfAttention(head, hidden_size, head_hidden_size;
-                       dropout = attention_dropout, causal = true, return_score = return_self_attention_score)
-
-    if UseCustomCrossAttention
-        ca = CustomCrossAttention(head, hidden_size, head_hidden_size; dropout = cross_attention_dropout, return_score)
-
-        ca_layer = CustomPostNormResidual(
-            Transformers.Layers.DropoutLayer(ca, dropout),
-            Transformers.Layers.LayerNorm(hidden_size))
-    else
-        ca = Transformers.Layers.CrossAttention(head, hidden_size, head_hidden_size; dropout = cross_attention_dropout, return_score)
-
-        ca_layer = Transformers.Layers.PostNormResidual(
-            Transformers.Layers.DropoutLayer(ca, dropout),
-            Transformers.Layers.LayerNorm(hidden_size))
-    end
-
-    ff1 = Transformers.Layers.Dense(act, hidden_size, intermediate_size)
-    ff2 = Transformers.Layers.Dense(intermediate_size, hidden_size)
-
-
-    return CustomTransformerDecoderBlock(
-        Transformers.Layers.PostNormResidual(
-            Transformers.Layers.DropoutLayer(sa, dropout),
-            Transformers.Layers.LayerNorm(hidden_size)),
-
-        ca_layer,
-
-        Transformers.Layers.PostNormResidual(
-            Transformers.Layers.DropoutLayer(Chain(ff1, ff2), dropout),
-            Transformers.Layers.LayerNorm(hidden_size)))
-end
-
-
-
-
-
 
 struct MATEncoderBlock{MHA,LN1,LN2,FF,DO}
     mha::MHA
@@ -160,9 +7,9 @@ struct MATEncoderBlock{MHA,LN1,LN2,FF,DO}
     dropout::DO
 end
 
-function MATEncoderBlock(d_model::Int, nheads::Int, d_ff::Int; pdrop=0.1)
+function MATEncoderBlock(d_model::Int, nheads::Int, head_dim::Int, d_ff::Int; pdrop=0.1)
     MATEncoderBlock(
-        MultiHeadAttention(d_model, nheads=nheads, dropout_prob=pdrop),
+        MultiHeadAttention(d_model => head_dim*nheads => d_model, nheads=nheads, dropout_prob=pdrop),
         LayerNorm(d_model),
         LayerNorm(d_model),
         Chain(Dense(d_model, d_ff, gelu), Dense(d_ff, d_model)),
@@ -192,19 +39,19 @@ struct MATDecoderBlock{MHA1,MHA2,LN1,LN2,LN3,FF,DO}
     ln3::LN3
     ff::FF
     dropout::DO
-    UseCustomCrossAttention::Bool
+    useCustomCrossAttention::Bool
 end
 
-function MATDecoderBlock(d_model::Int, nheads::Int, d_ff::Int; pdrop=0.1, UseCustomCrossAttention::Bool=false)
+function MATDecoderBlock(d_model::Int, nheads::Int, head_dim::Int, d_ff::Int; pdrop=0.1, useCustomCrossAttention::Bool=false)
     MATDecoderBlock(
-        MultiHeadAttention(d_model, nheads=nheads, dropout_prob=pdrop),
-        MultiHeadAttention(d_model, nheads=nheads, dropout_prob=pdrop),
+        MultiHeadAttention(d_model => head_dim*nheads => d_model, nheads=nheads, dropout_prob=pdrop),
+        MultiHeadAttention(d_model => head_dim*nheads => d_model, nheads=nheads, dropout_prob=pdrop),
         LayerNorm(d_model),
         LayerNorm(d_model),
         LayerNorm(d_model),
         Chain(Dense(d_model, d_ff, gelu), Dense(d_ff, d_model)),
         Dropout(pdrop),
-        UseCustomCrossAttention,
+        useCustomCrossAttention,
     )
 end
 
@@ -214,7 +61,7 @@ function (m::MATDecoderBlock)(x, obs_rep)
     # x: (d_model, T, B)
     mask = NNlib.make_causal_mask(x, dims=2)
 
-    if m.UseCustomCrossAttention
+    if m.useCustomCrossAttention
         y, _ = m.mha1(obs_rep, x, x; mask=mask)
         x = m.ln1(obs_rep .+ m.dropout(y))
     else
@@ -231,121 +78,162 @@ function (m::MATDecoderBlock)(x, obs_rep)
     return x
 end
 
-
-
-
-Base.@kwdef struct MATEncoder
-    embedding
-    position_encoding
-    ln
-    dropout
-    blocks
-    embedding_v
-    position_encoding_v
-    ln_v
-    dropout_v
-    blocks_v
-    head
-    jointPPO
+struct BlockStack{T}
+    blocks::T
 end
 
-Flux.@functor MATEncoder
+Flux.@layer BlockStack trainable=(blocks)
 
-function (st::MATEncoder)(x)
-    vv = st.embedding_v(x)
-    x = st.embedding(x)              # (dm, N, B)
+function BlockStack(N::Integer, d_model::Int, nheads::Int, head_dim::Int, d_ff::Int;
+                    pdrop=0.1, useCustomCrossAttention::Bool=false)
+    blocks = ntuple(_ -> MATDecoderBlock(d_model, nheads, head_dim, d_ff;
+                                         pdrop=pdrop,
+                                         useCustomCrossAttention=useCustomCrossAttention),
+                    Int(N))
+    return BlockStack(blocks)
+end
+
+function (s::BlockStack)(x, obs_rep)
+    for b in s.blocks
+        x = b(x, obs_rep)
+    end
+    return x
+end
+
+
+
+Base.@kwdef struct MATEncoder{
+    E, PE, LN, DO, BL,
+    EV, PEV, LNV, DOV, BLV,
+    H
+}
+    embedding::E
+    position_encoding::PE
+    ln::LN
+    dropout::DO
+    blocks::BL
+
+    embedding_v::EV = nothing
+    position_encoding_v::PEV = nothing
+    ln_v::LNV = nothing
+    dropout_v::DOV = nothing
+    blocks_v::BLV = nothing
+
+    head::H
+
+    jointPPO::Bool = false
+    useSeparateValueChain::Bool = false
+end
+
+Flux.@layer MATEncoder trainable=(embedding, position_encoding, ln, dropout, blocks, embedding_v, position_encoding_v, ln_v, dropout_v, blocks_v, head)
+
+function (m::MATEncoder)(x)
+
+    if m.useSeparateValueChain
+        vv = m.embedding_v(x)
+    end
+    
+    x = m.embedding(x)              # (dm, N, B)
     N = size(x, 2)
-    x = x .+ st.position_encoding(1:N) # (dm, N, B)
+    x = x .+ m.position_encoding(1:N) # (dm, N, B)
 
     if !(iszero(x))
-        x = st.ln(x)
+        x = m.ln(x)
     end
 
-    x = st.dropout(x)                # (dm, N, B)
+    x = m.dropout(x)                # (dm, N, B)
 
-    x = st.blocks(x, nothing)     # (dm, N, B)
-    rep = x[:hidden_state]
+    rep = m.blocks(x)     # (dm, N, B)
 
-    if st.jointPPO
-        vv = vv .+ st.position_encoding_v(1:N)
+    if m.useSeparateValueChain
+        if m.jointPPO
+            vv = vv .+ m.position_encoding_v(1:N)
 
-        if !(iszero(vv))
-            vv = st.ln_v(vv)
+            if !(iszero(vv))
+                vv = m.ln_v(vv)
+            end
+
+            vv = m.dropout_v(vv)                # (dm, N, B)
+            vv = m.blocks_v(vv)     # (dm, N, B)
+
+            sr = size(vv)
+            v = m.head( reshape(vv, sr[1]*sr[2], sr[3]) ) 
+            v = reshape(v, 1, 1, sr[3])                   # (1, 1, B)
+            v = repeat(v, 1,sr[2],1)                   # (1, N, B)
+        else
+            vv = vv .+ m.position_encoding_v(1:N)
+            
+            if !(iszero(vv))
+                vv = m.ln_v(vv)
+            end
+
+            vv = m.dropout_v(vv)                # (dm, N, B)
+            vv = m.blocks_v(vv)     # (dm, N, B)
+            v = m.head(vv)       # (1, N, B)
         end
-
-        vv = st.dropout_v(vv)                # (dm, N, B)
-        vv = st.blocks_v(vv, nothing)     # (dm, N, B)
-        vv = vv[:hidden_state]
-
-        sr = size(vv)
-        v = st.head( reshape(vv, sr[1]*sr[2], sr[3]) ) 
-        v = reshape(v, 1, 1, sr[3])                   # (1, 1, B)
-        v = repeat(v, 1,sr[2],1)                   # (1, N, B)
     else
-        vv = vv .+ st.position_encoding_v(1:N)
-        
-        if !(iszero(vv))
-            vv = st.ln_v(vv)
+        if m.jointPPO
+            sr = size(rep)
+            v = m.head( reshape(rep, sr[1]*sr[2], sr[3]) ) 
+            v = reshape(v, 1, 1, sr[3])                   # (1, 1, B)
+            v = repeat(v, 1,sr[2],1)                   # (1, N, B)
+        else
+            v = m.head(rep)                   # (1, N, B)
         end
-
-        vv = st.dropout_v(vv)                # (dm, N, B)
-        vv = st.blocks_v(vv, nothing)     # (dm, N, B)
-        v = st.head(vv[:hidden_state])       # (1, N, B)
-        #v = st.head(rep)                   # (1, N, B)
     end
 
     rep, v
 end
 
 
-Base.@kwdef struct MATDecoder
-    embedding
-    position_encoding
-    ln
-    dropout
-    blocks
-    head
-    logσ
+Base.@kwdef struct MATDecoder{
+    E, PE, LN, DO, BL, H, LOGP
+}
+    embedding::E
+    position_encoding::PE
+    ln::LN
+    dropout::DO
+    blocks::BL
+    head::H
+
+    logσ::LOGP
+
     logσ_is_network::Bool = false
     min_σ::Float32 = 0.0f0
     max_σ::Float32 = Inf32
 end
 
-Flux.@functor MATDecoder
+Flux.@layer MATDecoder trainable=(embedding, position_encoding, ln, dropout, blocks, head, logσ)
 
-function (st::MATDecoder)(x, obs_rep)
-    x = st.embedding(x)              # (dm, N, B)
+function (m::MATDecoder)(x, obs_rep)
+    x = m.embedding(x)              # (dm, N, B)
     N = size(x, 2)
-    x = x .+ st.position_encoding(1:N) # (dm, N, B)
+    x = x .+ m.position_encoding(1:N) # (dm, N, B)
 
     if !(iszero(x))
-        x = st.ln(x)
+        x = m.ln(x)
         # x = (x.-mean(x, dims=1))./std(x, dims=1)
     end
 
-    x = st.dropout(x)                # (dm, N, B)
+    x = m.dropout(x)                # (dm, N, B)
 
-    x = st.blocks(x, obs_rep, Masks.CausalMask(), Masks.CausalMask())     # (dm, N, B)
-    
-    x = x[:hidden_state]
+    x = m.blocks(x, obs_rep)     # (dm, N, B)
 
-    x = st.head(x)                   # (1, N, B)
+    x = m.head(x)                   # (1, N, B)
 
-    #x = st.head(obs_rep) 
-
-    if st.logσ_is_network
-        raw_logσ = st.logσ(obs_rep)
+    if m.logσ_is_network
+        raw_logσ = m.logσ(obs_rep)
     else
         if ndims(x) >= 2
             # TODO: Make it GPU friendly again (CUDA.fill or like Flux Dense Layer does it with bias - Linear Layer with freezing)
             #raw_logσ = hcat([raw_logσ for i in 1:size(μ)[2]]...)
-            raw_logσ = send_to_device(device(st.logσ), Float32.(ones(size(x)))) .* st.logσ
+            raw_logσ = send_to_device(device(m.logσ), Float32.(ones(size(x)))) .* m.logσ
         else
-            raw_logσ = st.logσ[:]
+            raw_logσ = m.logσ[:]
         end
     end
 
-    logσ = clamp.(raw_logσ, log(st.min_σ), log(st.max_σ))
+    logσ = clamp.(raw_logσ, log(m.min_σ), log(m.max_σ))
 
     return x, logσ
 end
@@ -509,11 +397,10 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
         
     end
 
-    if customCrossAttention
-        decoder_blocks = Transformer(CustomTransformerDecoderBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out)
-    else
-        decoder_blocks = Transformer(TransformerDecoderBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out)
-    end
+
+    decoder_blocks = BlockStack(block_num, dim_model, head_num, head_dim, ffn_dim; pdrop=drop_out, useCustomCrossAttention=customCrossAttention)
+
+    encoder_blocks = Chain(ntuple(_ -> MATEncoderBlock(dim_model, head_num, head_dim, ffn_dim; pdrop=drop_out), block_num)...)
 
     if positional_encoding == 1
         position_encoding_encoder = SinCosPositionEmbed(dim_model)
@@ -531,7 +418,7 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
         position_encoding = position_encoding_encoder,
         ln = LayerNorm(dim_model),
         dropout = Dropout(drop_out),
-        blocks = Transformer(TransformerBlock, block_num, head_num, dim_model, head_dim, ffn_dim; dropout = drop_out),
+        blocks = encoder_blocks,
         embedding_v = Dense(ns, dim_model, relu, bias = false),
         position_encoding_v = position_encoding_encoder,
         ln_v = LayerNorm(dim_model),
