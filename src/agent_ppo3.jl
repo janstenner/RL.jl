@@ -480,7 +480,8 @@ end
 
 function td_lambda_targets(
     rewards::Vector{Float32},
-    dones::Vector{Bool},
+    terminated::Vector{Bool},
+    truncated::Vector{Bool},
     next_values::Vector{Float32},
     γ::Float32=0.99f0;
     λ::Float32=0.7f0
@@ -488,9 +489,16 @@ function td_lambda_targets(
     T = length(rewards)
     targets = similar(rewards)
     Gλ = 0f0
+
     for t in T:-1:1
-        # für Schritt t ist next_values[t] = V(s_{t+1})
-        Gλ = rewards[t] + γ * ((1f0-λ)*next_values[t] + λ*Gλ) * (1 - dones[t])
+        term = terminated[t]
+        trunc = truncated[t]
+        done = term || trunc
+        bootstrap = !term  # trunc => true, echte termination => false
+
+        G_next = done ? (next_values[t] * bootstrap) : Gλ
+
+        Gλ = rewards[t] + γ * ((1f0 - λ) * next_values[t] + λ * G_next) * bootstrap
         targets[t] = Gλ
     end
     return targets
@@ -498,7 +506,8 @@ end
 
 function td_lambda_targets(
     rewards::AbstractMatrix,
-    dones::AbstractMatrix,
+    terminated::AbstractMatrix,
+    truncated::AbstractMatrix,
     next_values::AbstractMatrix,
     γ::Float32=0.99f0;
     λ::Float32=0.7f0,
@@ -507,7 +516,7 @@ function td_lambda_targets(
     results = zeros(Float32, size(rewards))
 
     for i in 1:size(rewards, 1)
-        results[i, :] = td_lambda_targets(rewards[i, :], dones[i, :], next_values[i, :], γ; λ=λ)
+        results[i, :] = td_lambda_targets(rewards[i, :], terminated[i, :], truncated[i, :], next_values[i, :], γ; λ=λ)
     end
 
     return results

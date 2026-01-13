@@ -55,6 +55,16 @@ const SLARTSLA = (
     :next_action,
 )
 
+const SARTTS = (
+    :state,
+    :action,
+    :reward,
+    :terminated,
+    :truncated,
+    :next_state,
+)
+
+
 
 
 
@@ -149,12 +159,16 @@ function sample(rng::AbstractRNG, t::AbstractTrajectory, s::BatchSampler)
 end
 
 function fetch!(s::BatchSampler, t::AbstractTrajectory, inds::Vector{Int})
-    batch = NamedTuple{keys(t)}(view(t[x], inds) for x in keys(t))
+
+    batch = NamedTuple{keys(t)}(consecutive_view(t[x], inds) for x in keys(t))
+
     if isnothing(s.cache)
-        s.cache = map(Flux.batch, batch)
+        s.cache = map(batch) do x
+            convert(Array, x)
+        end
     else
         map(s.cache, batch) do dest, src
-            batch!(dest, src)
+            copyto!(dest, src)
         end
     end
 end
@@ -173,6 +187,32 @@ function pde_fetch!(s::BatchSampler, t::Trajectory, inds::Vector{Int}, number_ac
     batch = NamedTuple{SARTS}((
         (consecutive_view(t[x], inds) for x in SART)...,
         consecutive_view(t[:state], inds .+ number_actuators),
+    ))
+
+    
+    if isnothing(s.cache)
+        s.cache = map(batch) do x
+            convert(Array, x)
+        end
+    else
+        map(s.cache, batch) do dest, src
+            copyto!(dest, src)
+        end
+    end
+end
+
+
+function pde_sample(rng::AbstractRNG, t::AbstractTrajectory, s::BatchSampler)
+    inds = rand(rng, 1:length(t), s.batch_size)
+    pde_fetch!(s, t, inds)
+    inds, s.cache
+end
+
+function pde_fetch!(s::BatchSampler, t::Trajectory, inds::Vector{Int})
+
+    batch = NamedTuple{SARTS}((
+        (consecutive_view(t[x], inds) for x in SART)...,
+        consecutive_view(t[:state], inds .+ 1),
     ))
 
     

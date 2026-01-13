@@ -120,8 +120,9 @@ function create_agent_sac(;action_space, state_space, use_gpu = false, rng, y, t
                 state = Float32 => (size(state_space)[1], n_agents),
                 action = Float32 => (size(action_space)[1], n_agents),
                 reward = Float32 => (n_agents),
-                terminal = Bool => (n_agents,),
-                #next_states = Float32 => (size(state_space)[1], n_agents),
+                terminated = Bool => (n_agents,),
+                truncated = Bool => (n_agents,),
+                next_state = Float32 => (size(state_space)[1], n_agents),
         ),
     )
 end
@@ -191,8 +192,9 @@ function update!(
     r = reward(env)[:]
 
     push!(trajectory[:reward], r)
-    push!(trajectory[:terminal], is_terminated(env))
-    #push!(trajectory[:next_states], state(env))
+    push!(trajectory[:terminated], is_terminated(env))
+    push!(trajectory[:truncated], is_truncated(env))
+    push!(trajectory[:next_state], state(env))
     #push!(trajectory[:next_values], policy.approximator.critic(send_to_device(device(policy.approximator), env.state)) |> send_to_host)
 end
 
@@ -202,19 +204,19 @@ function update!(
     ::AbstractEnv,
     ::PostActStage,
 )
-    if length(size(p.action_space)) == 2
-        number_actuators = size(p.action_space)[2]
-    else
-        #mono case 
-        number_actuators = 1
-    end
+    # if length(size(p.action_space)) == 2
+    #     number_actuators = size(p.action_space)[2]
+    # else
+    #     #mono case 
+    #     number_actuators = 1
+    # end
 
-    length(t) > p.update_after * number_actuators || return
+    length(t) > p.update_after || return
     p.update_step % p.update_freq == 0 || return
 
     #println("UPDATE!")
     for i = 1:p.update_loops
-        inds, batch = pde_sample(p.rng, t, BatchSampler{SARTS}(p.batch_size), number_actuators)
+        inds, batch = sample(p.rng, t, BatchSampler{SARTTS}(p.batch_size))
         update!(p, batch)
     end
 end
@@ -227,23 +229,23 @@ end
 function _update!(p::SACPolicy, t::AbstractTrajectory)
     #this is for imitation learning
 
-    if length(size(p.action_space)) == 2
-        number_actuators = size(p.action_space)[2]
-    else
-        #mono case 
-        number_actuators = 1
-    end
+    # if length(size(p.action_space)) == 2
+    #     number_actuators = size(p.action_space)[2]
+    # else
+    #     #mono case 
+    #     number_actuators = 1
+    # end
 
     for i = 1:p.update_loops
-        inds, batch = pde_sample(p.rng, t, BatchSampler{SARTS}(p.batch_size), number_actuators)
+        inds, batch = sample(p.rng, t, BatchSampler{SARTTS}(p.batch_size))
         update!(p, batch)
     end
 end
 
 
 
-function update!(p::SACPolicy, batch::NamedTuple{SARTS})
-    s, a, r, t, s′ = send_to_device(device(p.qnetwork1), batch)
+function update!(p::SACPolicy, batch::NamedTuple{SARTTS})
+    s, a, r, ter, trun, s′ = send_to_device(device(p.qnetwork1), batch)
 
     γ, τ, α = p.γ, p.τ, p.α
 
@@ -251,7 +253,7 @@ function update!(p::SACPolicy, batch::NamedTuple{SARTS})
     q′_input = vcat(s′, a′)
     q′ = min.(p.target_qnetwork1(q′_input), p.target_qnetwork2(q′_input))
 
-    y = r .+ γ .* (1 .- t) .* dropdims(q′ .- α .* log_π′, dims=1)
+    y = r .+ γ .* (1 .- ter) .* dropdims(q′ .- α .* log_π′, dims=1)
 
     p.last_target_q_mean = mean(y)
     p.last_mean_minus_log_pi = mean(-log_π′)

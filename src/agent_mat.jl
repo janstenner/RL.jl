@@ -22,9 +22,11 @@ Flux.@layer MATEncoderBlock trainable=(mha, ln1, ln2, ff)
 function (m::MATEncoderBlock)(x)
     # x: (d_model, T, B)
     y, _ = m.mha(x, x, x; mask=nothing)   # Self-Attention
-    x = m.ln1(x .+ m.dropout(y))
+    # x = m.ln1(x .+ m.dropout(y))
+    x = x .+ m.dropout(y)
     z = m.ff(x)
-    x = m.ln2(x .+ m.dropout(z))
+    # x = m.ln2(x .+ m.dropout(z))
+    x = x .+ m.dropout(z)
     return x
 end
 
@@ -63,17 +65,21 @@ function (m::MATDecoderBlock)(x, obs_rep)
 
     if m.useCustomCrossAttention
         y, _ = m.mha1(obs_rep, x, x; mask=mask)
-        x = m.ln1(obs_rep .+ m.dropout(y))
+        # x = m.ln1(obs_rep .+ m.dropout(y))
+        x = obs_rep .+ m.dropout(y)
     else
         y, _ = m.mha1(x, obs_rep, obs_rep; mask=mask)
-        x = m.ln1(x .+ m.dropout(y))
+        # x = m.ln1(x .+ m.dropout(y))
+        x = x .+ m.dropout(y)
     end
 
     y, _ = m.mha2(x, x, x; mask=mask)
-    x = m.ln2(x .+ m.dropout(y))
+    # x = m.ln2(x .+ m.dropout(y))
+    x = x .+ m.dropout(y)
 
     z = m.ff(x)
-    x = m.ln3(x .+ m.dropout(z))
+    # x = m.ln3(x .+ m.dropout(z))
+    x = x .+ m.dropout(z)
 
     return x
 end
@@ -251,6 +257,8 @@ function (m::MATDecoder)(x, obs_rep)
     x = run_blocks(m.blocks, x, obs_rep)     # (dm, N, B)
 
     x = m.head(x)                   # (1, N, B)
+
+    # x = m.head(obs_rep[:, 1:N, :])
 
     if m.logσ_is_network
         raw_logσ = m.logσ(obs_rep)
@@ -479,7 +487,7 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
 
 
     if useSeparateValueChain
-        embedding_v = Dense(ns, dim_model, relu, bias = false)
+        embedding_v = Dense(ns, dim_model, bias = false)
         position_encoding_v = deepcopy(position_encoding_encoder)
         ln_v = LayerNorm(dim_model)
         dropout_v = Dropout(drop_out)
@@ -495,7 +503,7 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     
 
     encoder = MATEncoder(
-        embedding = Dense(ns, dim_model, relu, bias = false),
+        embedding = Dense(ns, dim_model, bias = false),
         position_encoding = position_encoding_encoder,
         ln = LayerNorm(dim_model),
         dropout = Dropout(drop_out),
@@ -514,7 +522,7 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     )
 
     decoder = MATDecoder(
-        embedding = Dense(na, dim_model, relu, bias = false),
+        embedding = Dense(na, dim_model, bias = false),
         position_encoding = position_encoding_decoder,
         ln = LayerNorm(dim_model),
         dropout = Dropout(drop_out),
@@ -534,8 +542,8 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     # encoder_optimizer = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.RMSProp(learning_rate))
     # decoder_optimizer = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.RMSProp(learning_rate))
 
-    encoder_optimizer = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate, betas))
-    decoder_optimizer = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.Adam(learning_rate, betas))
+    encoder_optimizer = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas))
+    decoder_optimizer = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas))
 
     encoder_state_tree = Flux.setup(encoder_optimizer, encoder)
     decoder_state_tree = Flux.setup(decoder_optimizer, decoder)

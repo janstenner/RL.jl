@@ -284,32 +284,6 @@ function update!(
     
 end
 
-#custom sample function
-function pde_sample(rng::AbstractRNG, t::AbstractTrajectory, s::BatchSampler)
-    inds = rand(rng, 1:length(t), s.batch_size)
-    pde_fetch!(s, t, inds)
-    inds, s.cache
-end
-
-function pde_fetch!(s::BatchSampler, t::Trajectory, inds::Vector{Int})
-
-    batch = NamedTuple{SARTS}((
-        (consecutive_view(t[x], inds) for x in SART)...,
-        consecutive_view(t[:state], inds .+ 1),
-    ))
-
-    
-    if isnothing(s.cache)
-        s.cache = map(batch) do x
-            convert(Array, x)
-        end
-    else
-        map(s.cache, batch) do dest, src
-            copyto!(dest, src)
-        end
-    end
-end
-
 function update!(
     policy::DDPGTeamPolicy,
     traj::Trajectory,

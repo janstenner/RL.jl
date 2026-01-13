@@ -23,7 +23,7 @@ function _run(policy::AbstractPolicy, env::AbstractEnv, stop_condition, hook::Ab
         policy(PRE_EPISODE_STAGE, env)
         hook(PRE_EPISODE_STAGE, policy, env)
 
-        while !is_terminated(env) && !is_truncated(env)
+        while !(is_terminated(env) || is_truncated(env))
             action = policy(env)
 
             policy(PRE_ACT_STAGE, env, action)

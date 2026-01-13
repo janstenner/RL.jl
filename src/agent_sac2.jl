@@ -157,8 +157,9 @@ function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, 
                 state = Float32 => (size(state_space)[1], n_agents),
                 action = Float32 => (size(action_space)[1], n_agents),
                 reward = Float32 => (n_agents),
-                terminal = Bool => (n_agents,),
-                #next_states = Float32 => (size(state_space)[1], n_agents),
+                terminated = Bool => (n_agents,),
+                truncated = Bool => (n_agents,),
+                next_state = Float32 => (size(state_space)[1], n_agents),
         ),
     )
 end
@@ -228,9 +229,9 @@ function update!(
     r = reward(env)[:]
 
     push!(trajectory[:reward], r)
-    push!(trajectory[:terminal], is_terminated(env))
-    #push!(trajectory[:next_states], state(env))
-    #push!(trajectory[:next_values], policy.approximator.critic(send_to_device(device(policy.approximator), env.state)) |> send_to_host)
+    push!(trajectory[:terminated], is_terminated(env))
+    push!(trajectory[:truncated], is_truncated(env))
+    push!(trajectory[:next_state], state(env))
 end
 
 function update!(
@@ -239,14 +240,14 @@ function update!(
     ::AbstractEnv,
     ::PostActStage,
 )
-    if length(size(p.action_space)) == 2
-        number_actuators = size(p.action_space)[2]
-    else
-        #mono case 
-        number_actuators = 1
-    end
+    # if length(size(p.action_space)) == 2
+    #     number_actuators = size(p.action_space)[2]
+    # else
+    #     #mono case 
+    #     number_actuators = 1
+    # end
 
-    length(t) > p.update_after * number_actuators || return
+    length(t) > p.update_after || return
 
     
     
@@ -256,7 +257,7 @@ function update!(
     
     if p.update_step % p.update_freq == 0
         for i = 1:p.update_loops
-            inds, batch = pde_sample(p.rng, t, BatchSampler{SARTS}(p.batch_size), number_actuators)
+            inds, batch = sample(p.rng, t, BatchSampler{SARTTS}(p.batch_size))
             update!(p, batch)
         end
     end
@@ -378,15 +379,17 @@ function on_policy_update(p::SACPolicy2, traj::AbstractTrajectory; whole_traject
         s = send_to_device(device(p.qnetwork1), traj[:state][:,:,end-n_samples:end-1])
         a = send_to_device(device(p.qnetwork1), traj[:action][:,:,end-n_samples:end-1])
         r = send_to_device(device(p.qnetwork1), traj[:reward][:,end-n_samples:end-1])
-        t = send_to_device(device(p.qnetwork1), traj[:terminal][:,end-n_samples:end-1])
-        next_states = send_to_device(device(p.qnetwork1), traj[:state][:,:,end-n_samples+1:end])
+        ter = send_to_device(device(p.qnetwork1), traj[:terminated][:,end-n_samples:end-1])
+        trun = send_to_device(device(p.qnetwork1), traj[:truncated][:,end-n_samples:end-1])
+        next_states = send_to_device(device(p.qnetwork1), traj[:next_state][:,:,end-n_samples:end-1])
     else
         n_samples = length(traj)
         s = send_to_device(device(p.qnetwork1), traj[:state])
         a = send_to_device(device(p.qnetwork1), traj[:action])
         r = send_to_device(device(p.qnetwork1), traj[:reward])
-        t = send_to_device(device(p.qnetwork1), traj[:terminal])
-        next_states = deepcopy(circshift(s, (0,0,-1)))
+        ter = send_to_device(device(p.qnetwork1), traj[:terminated])
+        trun = send_to_device(device(p.qnetwork1), traj[:truncated])
+        next_states = send_to_device(device(p.qnetwork1), traj[:next_state])
         #next_states[:,:, end] = zeros(Float32, size(s, 1), size(s, 2))  # terminal state
     end
     
@@ -401,14 +404,14 @@ function on_policy_update(p::SACPolicy2, traj::AbstractTrajectory; whole_traject
 
     next_values = acc_mu
 
-    if whole_trajectory
-        next_values[:,:, end] .*= 0.0f0     # terminal states
-    end
+    # if whole_trajectory
+    #     next_values[:,:, end] .*= 0.0f0     # terminal states
+    # end
 
-    n_envs = size(t, 1)
+    n_envs = size(ter, 1)
     next_values = reshape( next_values, n_envs, :)
     
-    targets = td_lambda_targets(r, t, next_values, γ; λ = p.λ_targets)
+    targets = td_lambda_targets(r, ter, trun, next_values, γ; λ = p.λ_targets)
 
     q_input = vcat(s, a)
 
@@ -444,19 +447,13 @@ function on_policy_update(p::SACPolicy2, traj::AbstractTrajectory; whole_traject
 
 
     # polyak averaging
-    Functors.fmap(p.target_qnetwork1, p.qnetwork1) do tgt, src
-        if tgt isa AbstractArray && src isa AbstractArray
-            @. tgt = (1 - τ) * tgt + τ * src
-        end
-        tgt
+    for (dest, src) in zip(
+        Flux.params([p.target_qnetwork1, p.target_qnetwork2]),
+        Flux.params([p.qnetwork1, p.qnetwork2]),
+    )
+        dest .= (1 - τ) .* dest .+ τ .* src
     end
 
-    Functors.fmap(p.target_qnetwork2, p.qnetwork2) do tgt, src
-        if tgt isa AbstractArray && src isa AbstractArray
-            @. tgt = (1 - τ) * tgt + τ * src
-        end
-        tgt
-    end
 
     if p.use_popart
         # PopArt Polyak
@@ -612,23 +609,23 @@ end
 function _update!(p::SACPolicy2, t::AbstractTrajectory)
     #this is for imitation learning
 
-    if length(size(p.action_space)) == 2
-        number_actuators = size(p.action_space)[2]
-    else
-        #mono case 
-        number_actuators = 1
-    end
+    # if length(size(p.action_space)) == 2
+    #     number_actuators = size(p.action_space)[2]
+    # else
+    #     #mono case 
+    #     number_actuators = 1
+    # end
 
     for i = 1:p.update_loops
-        inds, batch = pde_sample(p.rng, t, BatchSampler{SARTS}(p.batch_size), number_actuators)
+        inds, batch = sample(p.rng, t, BatchSampler{SARTTS}(p.batch_size))
         update!(p, batch)
     end
 end
 
 
 
-function update!(p::SACPolicy2, batch::NamedTuple{SARTS})
-    s, a, r, t, next_states = send_to_device(device(p.qnetwork1), batch)
+function update!(p::SACPolicy2, batch::NamedTuple{SARTTS})
+    s, a, r, ter, trun, next_states = send_to_device(device(p.qnetwork1), batch)
 
     γ, τ, α = p.γ, p.τ, p.α
 
@@ -640,11 +637,11 @@ function update!(p::SACPolicy2, batch::NamedTuple{SARTS})
 
     next_values = acc_mu
 
-    n_envs = size(t, 1)
+    n_envs = size(ter, 1)
     next_values = reshape( next_values, n_envs, :)
 
 
-    y = r .+ γ .* (1 .- t) .* next_values
+    y = r .+ γ .* (1 .- ter) .* next_values
 
     
     logp_π′ = acc_logp
