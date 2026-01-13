@@ -147,9 +147,11 @@ function (m::MATEncoder)(x)
     N = size(x, 2)
     x = x .+ m.position_encoding(1:N) # (dm, N, B)
 
-    if !(iszero(x))
-        x = m.ln(x)
-    end
+    x = m.ln(x)
+
+    # if !(iszero(x))
+    #     x = m.ln(x)
+    # end
 
     x = m.dropout(x)                # (dm, N, B)
 
@@ -159,9 +161,11 @@ function (m::MATEncoder)(x)
         if m.jointPPO
             vv = vv .+ m.position_encoding_v(1:N)
 
-            if !(iszero(vv))
-                vv = m.ln_v(vv)
-            end
+            vv = m.ln_v(vv)
+
+            # if !(iszero(vv))
+            #     vv = m.ln_v(vv)
+            # end
 
             vv = m.dropout_v(vv)                # (dm, N, B)
             vv = run_blocks(m.blocks_v, vv)     # (dm, N, B)
@@ -172,10 +176,12 @@ function (m::MATEncoder)(x)
             v = repeat(v, 1,sr[2],1)                   # (1, N, B)
         else
             vv = vv .+ m.position_encoding_v(1:N)
-            
-            if !(iszero(vv))
-                vv = m.ln_v(vv)
-            end
+         
+            vv = m.ln_v(vv)
+
+            # if !(iszero(vv))
+            #     vv = m.ln_v(vv)
+            # end
 
             vv = m.dropout_v(vv)                # (dm, N, B)
             vv = run_blocks(m.blocks_v, vv)     # (dm, N, B)
@@ -232,10 +238,12 @@ function (m::MATDecoder)(x, obs_rep)
     N = size(x, 2)
     x = x .+ m.position_encoding(1:N) # (dm, N, B)
 
-    if !(iszero(x))
-        x = m.ln(x)
-        # x = (x.-mean(x, dims=1))./std(x, dims=1)
-    end
+    x = m.ln(x)
+
+    # if !(iszero(x))
+    #     x = m.ln(x)
+    #     # x = (x.-mean(x, dims=1))./std(x, dims=1)
+    # end
 
     x = m.dropout(x)                # (dm, N, B)
 
@@ -373,6 +381,38 @@ end
 
 (embed::ZeroEncoding)(x) = zeros(Float32, embed.hidden_size, length(x))
 
+struct SinCosPositionEmbed{A}
+    pe::A  # (d_model, maxlen)
+end
+
+Flux.@layer SinCosPositionEmbed trainable=()
+
+function SinCosPositionEmbed(d_model::Int, maxlen::Int=2048;
+                             base=10000f0, offset::Int=0, T::Type=Float32)
+    pe = zeros(T, d_model, maxlen)
+    nfreq = cld(d_model, 2)                 # Anzahl der sin-"Kanäle"
+    pos = T.(offset:offset+maxlen-1)        # 0,1,2,... (matcht Transformers.jl Beispiel)
+
+    @inbounds for j in 0:nfreq-1
+        denom = base^(T(2*j)/T(d_model))
+        angle = pos ./ denom
+        i_sin = 2j + 1
+        pe[i_sin, :] .= sin.(angle)
+        i_cos = 2j + 2
+        if i_cos <= d_model
+            pe[i_cos, :] .= cos.(angle)
+        end
+    end
+    return SinCosPositionEmbed(pe)
+end
+
+# pe(N) -> (d_model, N)
+(pe::SinCosPositionEmbed)(N::Int) = (N <= size(pe.pe, 2) || throw(ArgumentError("N=$N > maxlen=$(size(pe.pe,2))"));
+                                    @view pe.pe[:, 1:N])
+
+(pe::SinCosPositionEmbed)(idxs::AbstractVector{<:Integer}) = @view pe.pe[:, idxs]
+
+
 function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = leakyrelu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false, customCrossAttention = true, one_by_one_training = false, clip_range = 0.2f0, tanh_end = true, positional_encoding = 1, useSeparateValueChain = false)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
@@ -424,20 +464,6 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
 
     encoder_blocks = Chain(ntuple(_ -> MATEncoderBlock(dim_model, head_num, head_dim, ffn_dim; pdrop=drop_out), block_num)...)
 
-    if useSeparateValueChain
-        embedding_v = Dense(ns, dim_model, relu, bias = false)
-        position_encoding_v = position_encoding_encoder
-        ln_v = LayerNorm(dim_model)
-        dropout_v = Dropout(drop_out)
-        encoder_blocks_v = Chain(ntuple(_ -> TransformerBlock(dim_model, head_num, head_dim, ffn_dim; dropout=drop_out), block_num)...)
-    else
-        embedding_v = nothing
-        position_encoding_v = nothing
-        ln_v = nothing
-        dropout_v = nothing
-        encoder_blocks_v = nothing
-    end
-
     if positional_encoding == 1
         position_encoding_encoder = SinCosPositionEmbed(dim_model)
         position_encoding_decoder = SinCosPositionEmbed(dim_model)
@@ -448,6 +474,24 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
         position_encoding_encoder = ZeroEncoding(dim_model)
         position_encoding_decoder = ZeroEncoding(dim_model)
     end
+
+
+
+    if useSeparateValueChain
+        embedding_v = Dense(ns, dim_model, relu, bias = false)
+        position_encoding_v = deepcopy(position_encoding_encoder)
+        ln_v = LayerNorm(dim_model)
+        dropout_v = Dropout(drop_out)
+        encoder_blocks_v = Chain(ntuple(_ -> MATEncoderBlock(dim_model, head_num, head_dim, ffn_dim; pdrop=drop_out), block_num)...)
+    else
+        embedding_v = nothing
+        position_encoding_v = nothing
+        ln_v = nothing
+        dropout_v = nothing
+        encoder_blocks_v = nothing
+    end
+
+    
 
     encoder = MATEncoder(
         embedding = Dense(ns, dim_model, relu, bias = false),
@@ -783,6 +827,10 @@ function _update!(p::MATPolicy, t::Any)
     end
     advantages = to_device(advantages)
 
+    # @show advantages
+    # @show select_last_dim(values, 1:n_rollout)
+    # error("debug")
+
     actions = to_device(t[:action])
     action_log_probs = t[:action_log_prob]
 
@@ -846,6 +894,7 @@ function _update!(p::MATPolicy, t::Any)
                     newμ, newlogσ = decoder(cat(zeros(Float32,size(a,1),1,microbatch_size), μ, dims=2), obs_rep[:,1:n,:])
 
                     μ = cat(μ, newμ[:,end:end,:], dims=2)
+                    logσ = cat(logσ, newlogσ[:,end:end,:], dims=2)
                 end
                 
                 log_p′ₐ = sum(normlogpdf(μ, exp.(logσ), a), dims=1)
