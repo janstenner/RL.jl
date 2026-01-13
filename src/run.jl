@@ -23,7 +23,7 @@ function _run(policy::AbstractPolicy, env::AbstractEnv, stop_condition, hook::Ab
         policy(PRE_EPISODE_STAGE, env)
         hook(PRE_EPISODE_STAGE, policy, env)
 
-        while !is_terminated(env) # one episode
+        while !is_terminated(env) && !is_truncated(env)
             action = policy(env)
 
             policy(PRE_ACT_STAGE, env, action)
@@ -40,7 +40,7 @@ function _run(policy::AbstractPolicy, env::AbstractEnv, stop_condition, hook::Ab
             end
         end # end of an episode
 
-        if is_terminated(env)
+        if is_terminated(env) || is_truncated(env)
             policy(POST_EPISODE_STAGE, env)  # let the policy see the last observation
             hook(POST_EPISODE_STAGE, policy, env)
         end

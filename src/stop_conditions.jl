@@ -86,7 +86,7 @@ function StopAfterEpisode(episode; cur = 0, is_show_progress = true)
 end
 
 function (s::StopAfterEpisode)(agent, env)
-    if is_terminated(env)
+    if is_terminated(env) || is_truncated(env)
         s.cur += 1
         if !isnothing(s.progress)
             next!(s.progress;)
@@ -127,7 +127,7 @@ function StopAfterNoImprovement(fn, patience::Int, δ::T = 0.0f0) where {T<:Numb
 end
 
 function (s::StopAfterNoImprovement)(agent, env)::Bool
-    is_terminated(env) || return false # post episode stage
+    (is_terminated(env) || is_truncated(env)) || return false # post episode stage
     val = s.fn()
     if s.δ < val - s.peak
         s.counter = 1
@@ -151,7 +151,7 @@ Return `true` if the environment is terminated.
 """
 struct StopWhenDone end
 
-(s::StopWhenDone)(agent, env) = is_terminated(env)
+(s::StopWhenDone)(agent, env) = is_terminated(env) || is_truncated(env)
 
 #####
 # StopSignal
@@ -232,7 +232,7 @@ function (s::StopAfterEpisodeWithMinSteps)(agent, env)
     res = false
     if (s.cur >= s.step)
         #now check if the episode is over
-        if is_terminated(env)
+        if is_terminated(env) || is_truncated(env)
             res = true
         end
     end

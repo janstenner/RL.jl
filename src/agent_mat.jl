@@ -147,7 +147,7 @@ function (m::MATEncoder)(x)
     N = size(x, 2)
     x = x .+ m.position_encoding(1:N) # (dm, N, B)
 
-    x = m.ln(x)
+    # x = m.ln(x)
 
     # if !(iszero(x))
     #     x = m.ln(x)
@@ -177,7 +177,7 @@ function (m::MATEncoder)(x)
         else
             vv = vv .+ m.position_encoding_v(1:N)
          
-            vv = m.ln_v(vv)
+            # vv = m.ln_v(vv)
 
             # if !(iszero(vv))
             #     vv = m.ln_v(vv)
@@ -185,6 +185,7 @@ function (m::MATEncoder)(x)
 
             vv = m.dropout_v(vv)                # (dm, N, B)
             vv = run_blocks(m.blocks_v, vv)     # (dm, N, B)
+
             v = m.head(vv)       # (1, N, B)
         end
     else
@@ -238,7 +239,7 @@ function (m::MATDecoder)(x, obs_rep)
     N = size(x, 2)
     x = x .+ m.position_encoding(1:N) # (dm, N, B)
 
-    x = m.ln(x)
+    # x = m.ln(x)
 
     # if !(iszero(x))
     #     x = m.ln(x)
@@ -413,7 +414,7 @@ end
 (pe::SinCosPositionEmbed)(idxs::AbstractVector{<:Integer}) = @view pe.pe[:, idxs]
 
 
-function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = leakyrelu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false, customCrossAttention = true, one_by_one_training = false, clip_range = 0.2f0, tanh_end = true, positional_encoding = 1, useSeparateValueChain = false)
+function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = leakyrelu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false, customCrossAttention = true, one_by_one_training = false, clip_range = 0.2f0, tanh_end = false, positional_encoding = 1, useSeparateValueChain = false)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -574,8 +575,9 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
                 action = Float32 => (size(action_space)[1], n_actors),
                 action_log_prob = Float32 => (n_actors),
                 reward = Float32 => (n_actors),
-                terminal = Bool => (n_actors,),
-                values = Float32 => (1, n_actors),
+                terminated = Bool => (n_actors,),
+                truncated = Bool => (n_actors,),
+                next_state = Float32 => (size(state_space)[1], n_actors),
         ),
     )
 end
@@ -738,10 +740,6 @@ function update!(
         action=action,
         action_log_prob=policy.last_action_log_prob
     )
-
-    obs_rep, values = policy.encoder(send_to_device(device(policy.encoder), env.state)) |> send_to_host
-
-    push!(trajectory[:values], values)
 end
 
 
@@ -753,11 +751,10 @@ function update!(
 )
     r = reward(env)[:]
 
-    next_obs_rep, next_values = policy.encoder(send_to_device(device(policy.encoder), env.state)) |> send_to_host
-
     push!(trajectory[:reward], r)
-    push!(trajectory[:terminal], is_terminated(env))
-    policy.next_values = next_values[:]
+    push!(trajectory[:terminated], is_terminated(env))
+    push!(trajectory[:truncated], is_truncated(env))
+    push!(trajectory[:next_state], state(env))
 end
 
 function update!(
@@ -787,27 +784,38 @@ function _update!(p::MATPolicy, t::Any)
     w₁ = p.actor_loss_weight
     w₂ = p.critic_loss_weight
     w₃ = p.entropy_loss_weight
+
     D = device(p.encoder)
     to_device(x) = send_to_device(D, x)
 
-    n_actors, n_rollout = size(t[:terminal])
+    n_actors, n_rollout = size(t[:terminated])
+
     @assert n_rollout % n_microbatches == 0 "size mismatch"
-    microbatch_size = n_rollout ÷ n_microbatches
+
+    microbatch_size = Int(floor(n_rollout ÷ n_microbatches))
 
     n = length(t)
     states = to_device(t[:state])
+    next_states = to_device(t[:next_state])
 
-    values = reshape(flatten_batch(t[:values]), n_actors, :)
-    next_values = cat(values[:,2:end], p.next_values, dims=2)
+    states_flatten_on_host = flatten_batch(select_last_dim(t[:state], 1:n))
+
+    _, values = p.encoder(states)
+    _, next_values = p.encoder(next_states)
+
+    values = reshape(send_to_host(values), n_actors, :)
+    next_values = reshape(send_to_host(next_values), n_actors, :)
 
     rewards = t[:reward]
-    terminal = t[:terminal]
+    terminated = t[:terminated]
+    truncated = t[:truncated]
 
     if p.jointPPO
         values = values[1,:]
         next_values = next_values[1,:]
         rewards = rewards[1,:]
-        terminal = terminal[1,:]
+        terminated = terminated[1,:]
+        truncated = truncated[1,:]
     end
 
     advantages, _ = generalized_advantage_estimation(
@@ -817,7 +825,8 @@ function _update!(p::MATPolicy, t::Any)
         γ,
         λ;
         dims=2,
-        terminal=terminal
+        terminated=terminated,
+        truncated=truncated,
     )
 
     if p.jointPPO

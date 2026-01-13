@@ -203,19 +203,7 @@ consecutive_view(cb::AbstractArray, inds::Vector{Int}, n_stack::Int, n_horizon::
 
 
 
-"""
-    generalized_advantage_estimation(rewards::VectorOrMatrix, values::VectorOrMatrix, γ::Number, λ::Number;kwargs...)
 
-Calculate the generalized advantage estimate started from the current step with discount rate of `γ` and a lambda for GAE-Lambda of 'λ'.
-`rewards` and 'values' can be a matrix.
-
-# Keyword arguments
-
-- `dims=:`, if `rewards` is a `Matrix`, then `dims` can only be `1` or `2`.
-- `terminal=nothing`, specify if each reward follows by a terminal. `nothing` means the game is not terminated yet. If `terminal` is provided, then the size must be the same with `rewards`.
-
-# Example
-"""
 const VectorOrMatrix = Union{AbstractMatrix,AbstractVector}
 
 function generalized_advantage_estimation(
@@ -227,103 +215,116 @@ function generalized_advantage_estimation(
     kwargs...,
 ) where {T<:Number}
     advantages = similar(rewards, promote_type(eltype(rewards), T))
-    returns = similar(rewards, promote_type(eltype(rewards), T))
-    generalized_advantage_estimation!(advantages, returns, rewards, values, next_values, γ, λ; kwargs...)
+    boot_returns = similar(rewards, promote_type(eltype(rewards), T))
+    generalized_advantage_estimation!(advantages, boot_returns, rewards, values, next_values, γ, λ; kwargs...)
     
-    advantages, returns
+    advantages, boot_returns
 end
 
 generalized_advantage_estimation!(
     advantages,
-    returns,
+    boot_returns,
     rewards,
     values,
     next_values,
     γ,
     λ;
-    terminal = nothing,
+    terminated = nothing,
+    truncated = nothing,
     dims = :,
-) = _generalized_advantage_estimation!(advantages, returns, rewards, values, next_values, γ, λ, terminal, dims)
+) = _generalized_advantage_estimation!(advantages, boot_returns, rewards, values, next_values, γ, λ, terminated, truncated, dims)
 
 function _generalized_advantage_estimation!(
     advantages::AbstractMatrix,
-    returns::AbstractMatrix,
+    boot_returns::AbstractMatrix,
     rewards::AbstractMatrix,
     values::AbstractMatrix,
     next_values::AbstractMatrix,
     γ,
     λ,
-    terminal::Nothing,
+    terminated::Nothing,
+    truncated::Nothing,
     dims::Int,
 )
     dims = ndims(rewards) - dims + 1
     for (adv, ret, r, v, nv) in zip(
         eachslice(advantages, dims = dims),
-        eachslice(returns, dims = dims),
+        eachslice(boot_returns, dims = dims),
         eachslice(rewards, dims = dims),
         eachslice(values, dims = dims),
         eachslice(next_values, dims = dims),
     )
-        _generalized_advantage_estimation!(adv, ret, r, v, nv, γ, λ, nothing)
+        _generalized_advantage_estimation!(adv, ret, r, v, nv, γ, λ, nothing, nothing)
     end
 end
 
 
 function _generalized_advantage_estimation!(
     advantages::AbstractMatrix,
-    returns::AbstractMatrix,
+    boot_returns::AbstractMatrix,
     rewards::AbstractMatrix,
     values::AbstractMatrix,
     next_values::AbstractMatrix,
     γ,
     λ,
-    terminal,
+    terminated,
+    truncated,
     dims::Int,
 )
     dims = ndims(rewards) - dims + 1
-    for (adv, ret, r, v, nv, t) in zip(
+    for (adv, ret, r, v, nv, ter, trun) in zip(
         eachslice(advantages, dims = dims),
-        eachslice(returns, dims = dims),
+        eachslice(boot_returns, dims = dims),
         eachslice(rewards, dims = dims),
         eachslice(values, dims = dims),
         eachslice(next_values, dims = dims),
-        eachslice(terminal, dims = dims),
+        eachslice(terminated, dims = dims),
+        eachslice(truncated, dims = dims),
     )
-        _generalized_advantage_estimation!(adv, ret, r, v, nv, γ, λ, t)
+        _generalized_advantage_estimation!(adv, ret, r, v, nv, γ, λ, ter, trun)
     end
 end
 
 _generalized_advantage_estimation!(
     advantages::AbstractVector,
-    returns::AbstractVector,
+    boot_returns::AbstractVector,
     rewards::AbstractVector,
     values::AbstractVector,
     next_values::AbstractVector,
     γ,
     λ,
-    terminal,
+    terminated,
+    truncated,
     dims,
-) = _generalized_advantage_estimation!(advantages, returns, rewards, values, next_values, γ, λ, terminal)
+) = _generalized_advantage_estimation!(advantages, boot_returns, rewards, values, next_values, γ, λ, terminated, truncated)
 
 
-"assuming rewards and advantages are Vector"
-function _generalized_advantage_estimation!(advantages, returns, rewards, values, next_values, γ, λ, terminal)
+# assuming rewards and advantages are Vector
+function _generalized_advantage_estimation!(advantages, boot_returns, rewards, values, next_values, γ, λ, terminated, truncated)
     gae = 0.0f0
+    T = length(rewards)
 
-    for i in length(rewards):-1:1
-        is_continue = isnothing(terminal) ? true : (!terminal[i])
-        delta = rewards[i] + γ * next_values[i] * is_continue - values[i]
-        gae = delta + γ * λ * is_continue * gae
+    for i in T:-1:1
+        term = isnothing(terminated) ? false : terminated[i]
+        trunc = isnothing(truncated)  ? false : truncated[i]
+        done = term || trunc                 # Reset-Grenze
+        bootstrap = !term                    # Timeout/trunc => true, echte Termination => false
+
+        delta = rewards[i] + γ * next_values[i] * bootstrap - values[i]
+        gae   = delta + γ * λ * (!done) * gae
+
         advantages[i] = gae
 
-        if i == length(rewards)
-            returns[i] = rewards[i] + γ * next_values[i] * is_continue
-        else
-            returns[i] = rewards[i] + γ * returns[i + 1] * is_continue
-        end
+        next_ret =
+            (i == T)    ? (next_values[i] * bootstrap) :
+            term        ? 0.0f0 :
+            trunc       ? next_values[i] :
+                          boot_returns[i+1]
+
+        boot_returns[i] = rewards[i] + γ * next_ret
     end
 
-    return advantages, returns
+    return advantages, boot_returns
 end
 
 

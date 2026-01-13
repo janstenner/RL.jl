@@ -76,7 +76,7 @@ function create_logσ(;logσ_is_network, ns, na, use_gpu, init, nna_scale, drop_
     return res
 end
 
-function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, noise = nothing, noise_scale = 90, clip_range_vf = 0.2f0)
+function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, noise = nothing, noise_scale = 90, clip_range_vf = nothing)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -136,7 +136,8 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
                 action = Float32 => (size(action_space)[1], n_envs),
                 action_log_prob = Float32 => (n_envs),
                 reward = Float32 => (n_envs),
-                terminal = Bool => (n_envs,),
+                terminated = Bool => (n_envs,),
+                truncated = Bool => (n_envs,),
                 next_state = Float32 => (size(state_space)[1], n_envs),
         ),
     )
@@ -144,32 +145,6 @@ end
 
 
 
-"""
-    PPOPolicy(;kwargs)
-
-# Keyword arguments
-
-- `approximator`,
-- `γ = 0.99f0`,
-- `λ = 0.95f0`,
-- `clip_range = 0.2f0`,
-- `max_grad_norm = 0.5f0`,
-- `n_microbatches = 4`,
-- `n_epochs = 4`,
-- `actor_loss_weight = 1.0f0`,
-- `critic_loss_weight = 0.5f0`,
-- `entropy_loss_weight = 0.01f0`,
-- `dist = Categorical`,
-- `rng = Random.GLOBAL_RNG`,
-
-If `dist` is set to `Categorical`, it means it will only work
-on environments of discrete actions. To work with environments of continuous
-actions `dist` should be set to `Normal` and the `actor` in the `approximator`
-should be a `GaussianNetwork`. Using it with a `GaussianNetwork` supports 
-multi-dimensional action spaces, though it only supports it under the assumption
-that the dimensions are independent since the `GaussianNetwork` outputs a single
-`μ` and `σ` for each dimension which is used to simplify the calculations.
-"""
 
 
 mutable struct PPOPolicy{A<:ActorCritic,D,R} <: AbstractPolicy
@@ -413,7 +388,8 @@ function update!(
     r = reward(env)[:]
 
     push!(trajectory[:reward], r)
-    push!(trajectory[:terminal], is_terminated(env))
+    push!(trajectory[:terminated], is_terminated(env))
+    push!(trajectory[:truncated], is_truncated(env))
     push!(trajectory[:next_state], state(env))
 end
 
@@ -452,7 +428,7 @@ function _update!(p::PPOPolicy, t::Any)
     D = device(AC)
     to_device(x) = send_to_device(D, x)
 
-    n_envs, n_rollout = size(t[:terminal])
+    n_envs, n_rollout = size(t[:terminated])
 
     microbatch_size = Int(floor(n_envs * n_rollout ÷ n_microbatches))
 
@@ -473,7 +449,8 @@ function _update!(p::PPOPolicy, t::Any)
         γ,
         λ;
         dims=2,
-        terminal=t[:terminal]
+        terminated=t[:terminated],
+        truncated=t[:truncated]
     )
     returns = to_device(advantages .+ select_last_dim(values, 1:n_rollout))
     advantages = to_device(advantages)

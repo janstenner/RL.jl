@@ -27,7 +27,9 @@ mutable struct GeneralEnv <: AbstractEnv
 
     reward
  
-    done
+    terminated
+    truncated
+    terminated_at_timeout
 
 
     max_value
@@ -50,7 +52,8 @@ function GeneralEnv(; te = 2.0,
                   reward = 0.0, 
                   max_value = 20.0,
                   check_max_value = "y",
-                  use_gpu = false)
+                  use_gpu = false,
+                  terminated_at_timeout = false,)
 
     if isnothing(f)
         f = function(u = nothing, p = nothing, t = nothing; env = nothing)
@@ -110,7 +113,8 @@ function GeneralEnv(; te = 2.0,
         reward = 0.0
     end
  
-    done = false
+    terminated = false
+    truncated = false
 
     GeneralEnv(te, 
            t0, 
@@ -133,7 +137,9 @@ function GeneralEnv(; te = 2.0,
            steps, 
            time, 
            reward, 
-           done,
+           terminated,
+           truncated,
+           terminated_at_timeout,
            max_value,
            check_max_value)
 end
@@ -143,7 +149,8 @@ action_space(env::GeneralEnv) = env.action_space
 state_space(env::GeneralEnv) = env.state_space
 
 reward(env::GeneralEnv) = env.reward
-is_terminated(env::GeneralEnv) = env.done
+is_terminated(env::GeneralEnv) = env.terminated
+is_truncated(env::GeneralEnv) = env.truncated
 state(env::GeneralEnv) = env.state
 
 function reset!(env::GeneralEnv)
@@ -155,7 +162,8 @@ function reset!(env::GeneralEnv)
     env.steps = 0
     env.time = 0.0
     env.reward = 0
-    env.done = false
+    env.terminated = false
+    env.truncated = false
     nothing
 end
 
@@ -198,22 +206,26 @@ function (env::GeneralEnv)(action; reward_shaping = true)
 
     env.steps += 1
     env.time += env.dt
-    if !env.done
+
+    if !env.terminated
         if env.check_max_value == "y"
-            env.done = env.time >= env.te || maximum(abs.(env.y)) > env.max_value
+            env.terminated = maximum(abs.(env.y)) > env.max_value
             if maximum(abs.(env.y)) > env.max_value
                 println("terminated early at $(env.steps) steps")
-                #env.reward += -0.4 * (1 - (env.time/env.te)) .* ones(size(env.reward))
             end
-        elseif env.check_max_value == "reward"
-            env.done = env.time >= env.te || maximum(abs.(env.reward)) > env.max_value
+        else env.check_max_value == "reward"
+            env.terminated = maximum(abs.(env.reward)) > env.max_value
             if maximum(abs.(env.reward)) > env.max_value
                 println("terminated early at $(env.steps) steps")
-                #env.reward += -0.4 * (1 - (env.time/env.te)) .* ones(size(env.reward))
             end
+        end
+    end
+
+    if env.time >= env.te
+        if env.terminated_at_timeout
+            env.terminated = true
         else
-            
-            env.done = env.time >= env.te
+            env.truncated = true
         end
     end
 end
