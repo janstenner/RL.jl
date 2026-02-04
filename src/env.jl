@@ -213,7 +213,7 @@ function (env::GeneralEnv)(action; reward_shaping = true)
             if maximum(abs.(env.y)) > env.max_value
                 println("terminated early at $(env.steps) steps")
             end
-        else env.check_max_value == "reward"
+        elseif env.check_max_value == "reward"
             env.terminated = maximum(abs.(env.reward)) > env.max_value
             if maximum(abs.(env.reward)) > env.max_value
                 println("terminated early at $(env.steps) steps")
