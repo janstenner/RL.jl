@@ -112,7 +112,8 @@ function create_agent(;action_space, state_space, use_gpu, rng, y, p, batch_size
                 state = Float32 => size(state_space)[1],
                 action = Float32 => size(action_space)[1],
                 reward = Float32 => reward_size,
-                terminal = Bool => ()
+                terminated = Bool => (),
+                truncated = Bool => ()
             ),
     )
 end
@@ -275,9 +276,13 @@ function update!(
     r = reward(env)
 
     #We assume that state_space[2] == size(r)[1]
+    done = is_terminated(env) || is_truncated(env)
+    trunc = is_truncated(env)
     for i in 1:size(r)[1]
         push!(trajectory[:reward], r[i])
-        push!(trajectory[:terminal], is_terminated(env))
+        # SARTS samplers consume :terminated as the done-mask in this agent.
+        push!(trajectory[:terminated], done)
+        push!(trajectory[:truncated], trunc)
     end
 end
 
@@ -330,7 +335,7 @@ end
 
 function update!(policy::CustomDDPGPolicy, batch::NamedTuple{SARTS})
     
-    s, a, r, t, snext = batch
+    s, a, r, terminated, snext = batch
 
     if isnothing(policy.actor_state_tree) || isnothing(policy.critic_state_tree)
         println("________________________________________________________________________")
@@ -354,14 +359,14 @@ function update!(policy::CustomDDPGPolicy, batch::NamedTuple{SARTS})
     #     new_t = hcat(new_t, t[i] * ones(size(policy.action_space)[2])')
     # end
     
-    # s, a, r, t, snext = send_to_device(device(policy), (s, a, r, new_t, snext))
+    # s, a, r, terminated, snext = send_to_device(device(policy), (s, a, r, new_t, snext))
 
-    s, a, r, t, snext = send_to_device(device(policy), (s, a, r, t, snext))
+    s, a, r, terminated, snext = send_to_device(device(policy), (s, a, r, terminated, snext))
 
     anext = Aₜ(snext)
     qₜ = Cₜ(vcat(snext, anext)) |> vec
     #qₜ = - abs.( (s .* 50 - 30 .* Aₜ(snext)) / 50 ) |> vec
-    qnext = r .+ y .* (1 .- t) .* qₜ
+    qnext = r .+ y .* (1 .- terminated) .* qₜ
     a = Flux.unsqueeze(a, ndims(a)+1)
 
     critic_grad = Flux.gradient(C) do critic

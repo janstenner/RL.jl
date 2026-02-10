@@ -249,7 +249,8 @@ function create_agent_flow_ppo(;action_space, state_space, use_gpu, rng, y, p, u
                 action_log_prob = Float32 => (n_envs),
                 reward = Float32 => (n_envs),
                 explore_mod = Float32 => (n_envs),
-                terminal = Bool => (n_envs,),
+                terminated = Bool => (n_envs,),
+                truncated = Bool => (n_envs,),
                 next_state = Float32 => (size(state_space)[1], n_envs),
         ),
     )
@@ -385,7 +386,8 @@ function update!(
     r = reward(env)[:]
 
     push!(trajectory[:reward], r)
-    push!(trajectory[:terminal], is_terminated(env))
+    push!(trajectory[:terminated], is_terminated(env))
+    push!(trajectory[:truncated], is_truncated(env))
     push!(trajectory[:next_state], state(env))
     #push!(trajectory[:next_values], policy.approximator.critic(send_to_device(device(policy.approximator), env.state)) |> send_to_host)
 end
@@ -510,7 +512,7 @@ function _update!(p::FlowPPOPolicy, t::Any; update_actor = true, update_critic =
     D = RL.device(AC)
     to_device(x) = send_to_device(D, x)
 
-    n_envs, n_trajectory = size(t[:terminal])
+    n_envs, n_trajectory = size(t[:terminated])
     n_rollout = min(p.update_freq, n_trajectory)
 
 
@@ -538,7 +540,8 @@ function _update!(p::FlowPPOPolicy, t::Any; update_actor = true, update_critic =
 
 
     rewards = collect(to_device(t[:reward][:,valid_indices]))
-    terminal = collect(to_device(t[:terminal][:,valid_indices]))
+    terminated = collect(to_device(t[:terminated][:,valid_indices]))
+    truncated = collect(to_device(t[:truncated][:,valid_indices]))
 
 
     gae_deltas = approximate_deltas(p, states, actions)
@@ -551,7 +554,8 @@ function _update!(p::FlowPPOPolicy, t::Any; update_actor = true, update_critic =
         γ,
         λ;
         dims=2,
-        terminal=terminal
+        terminated=terminated,
+        truncated=truncated,
     )
 
     advantages = to_device(advantages)
@@ -576,7 +580,7 @@ function _update!(p::FlowPPOPolicy, t::Any; update_actor = true, update_critic =
 
     next_states = to_device(flatten_batch(t[:next_state][:,:,valid_indices]))
     next_values = approximate_values(p, next_states)
-    targets = td_lambda_targets(rewards, terminal, next_values, γ; λ = p.λ_targets)
+    targets = td_lambda_targets(rewards, terminated, truncated, next_values, γ; λ = p.λ_targets)
     
 
     for epoch in 1:n_epochs

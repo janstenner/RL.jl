@@ -243,7 +243,8 @@ function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, updat
                 action_log_prob = Float32 => (n_envs),
                 reward = Float32 => (n_envs),
                 explore_mod = Float32 => (n_envs),
-                terminal = Bool => (n_envs,),
+                terminated = Bool => (n_envs,),
+                truncated = Bool => (n_envs,),
                 next_state = Float32 => (size(state_space)[1], n_envs),
         ),
     )
@@ -529,7 +530,8 @@ function update!(
     r = reward(env)[:]
 
     push!(trajectory[:reward], r)
-    push!(trajectory[:terminal], is_terminated(env))
+    push!(trajectory[:terminated], is_terminated(env))
+    push!(trajectory[:truncated], is_truncated(env))
     push!(trajectory[:next_state], state(env))
     #push!(trajectory[:next_values], policy.approximator.critic(send_to_device(device(policy.approximator), env.state)) |> send_to_host)
 end
@@ -590,11 +592,11 @@ function sample_negatives_far(x_batch::AbstractMatrix{T};
 end
 
 
-function prepare_values(values, terminal)
+function prepare_values(values, terminated)
     offset_value = 0.0
 
     for i in length(values):-1:1
-        if terminal[i]
+        if terminated[i]
             offset_value = values[i]
         end
         values[i] -= offset_value
@@ -725,7 +727,7 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
     D = device(AC)
     to_device(x) = send_to_device(D, x)
 
-    n_envs, n_rollout = size(t[:terminal])
+    n_envs, n_rollout = size(t[:terminated])
     
     microbatch_size = Int(floor(n_envs * n_rollout ÷ n_microbatches))
     actorbatch_size = p.actorbatch_size
@@ -740,7 +742,7 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
 
     values = reshape(send_to_host(AC.critic(flatten_batch(states))), n_envs, :)
 
-    #values = prepare_values(values, t[:terminal])
+    #values = prepare_values(values, t[:terminated])
 
     mus = AC.actor.μ(states_flatten_on_host)
     offsets = reshape(send_to_host( AC.critic2( vcat(flatten_batch(states), mus) )) , n_envs, :)
@@ -759,7 +761,8 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
         γ,
         λ;
         dims=2,
-        terminal=t[:terminal]
+        terminated=t[:terminated],
+        truncated=t[:truncated],
     )
 
     # returns = to_device(advantages .+ select_last_dim(values, 1:n_rollout))
@@ -801,7 +804,9 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
 
     next_states = to_device(flatten_batch(t[:next_state]))
     rewards = to_device(t[:reward])
-    terminal = to_device(t[:terminal])
+    terminated = to_device(t[:terminated])
+    truncated = to_device(t[:truncated])
+    done = terminated .| truncated
 
     v_ref = AC.critic_frozen( to_device(flatten_batch(t[:state])) )[:] 
 
@@ -809,10 +814,10 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
 
 
     next_values = reshape( AC.critic( next_states ), n_envs, :)
-    targets = lambda_truncated_targets(rewards, terminal, next_values, γ)[:]
+    targets = lambda_truncated_targets(rewards, done, next_values, γ)[:]
 
     next_q_values = reshape( AC.critic2( vcat(next_states, AC.actor.μ( next_states) ) ), n_envs, :)
-    targets_q = td_lambda_targets(rewards, terminal, next_q_values, γ; λ=0.7f0)[:]
+    targets_q = td_lambda_targets(rewards, terminated, truncated, next_q_values, γ; λ=0.7f0)[:]
 
     collector = BatchQuantileCollector()
     
@@ -983,7 +988,7 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
 
             nv′ = vec(next_values)[inds]
             rew = vec(rewards)[inds]
-            ter = vec(terminal)[inds]
+            ter = vec(terminated)[inds]
 
             tar = rew + γ * nv′ .* (1 .- ter)
             tar = vec(targets_q)[inds]
