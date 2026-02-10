@@ -804,9 +804,9 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
 
     next_states = to_device(flatten_batch(t[:next_state]))
     rewards = to_device(t[:reward])
-    terminated = to_device(t[:terminated])
-    truncated = to_device(t[:truncated])
-    done = terminated .| truncated
+    terminated = Matrix{Bool}(to_device(t[:terminated]))
+    truncated = Matrix{Bool}(to_device(t[:truncated]))
+    done = Matrix{Bool}(terminated .| truncated)
 
     v_ref = AC.critic_frozen( to_device(flatten_batch(t[:state])) )[:] 
 
