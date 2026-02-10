@@ -235,7 +235,8 @@ function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, updat
                 action_log_prob = Float32 => (n_envs),
                 reward = Float32 => (n_envs),
                 explore_mod = Float32 => (n_envs),
-                terminal = Bool => (n_envs,),
+                terminated = Bool => (n_envs,),
+                truncated = Bool => (n_envs,),
                 next_state = Float32 => (size(state_space)[1], n_envs),
         ),
     )
@@ -378,7 +379,8 @@ function update!(
     r = reward(env)[:]
 
     push!(trajectory[:reward], r)
-    push!(trajectory[:terminal], is_terminated(env))
+    push!(trajectory[:terminated], is_terminated(env))
+    push!(trajectory[:truncated], is_truncated(env))
     push!(trajectory[:next_state], state(env))
     #push!(trajectory[:next_values], policy.approximator.critic(send_to_device(device(policy.approximator), env.state)) |> send_to_host)
 end
@@ -842,7 +844,7 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
     D = RL.device(AC)
     to_device(x) = send_to_device(D, x)
 
-    n_envs, n_trajectory = size(t[:terminal])
+    n_envs, n_trajectory = size(t[:terminated])
     n_rollout = min(p.update_freq, n_trajectory)
 
 
@@ -889,13 +891,14 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
     offsets = reshape(send_to_host( AC.critic2( offset_input )) , n_envs, :)
 
     rewards = collect(to_device(t[:reward][:,valid_indices]))
-    terminal = collect(to_device(t[:terminal][:,valid_indices]))
+    terminated = collect(to_device(t[:terminated][:,valid_indices]))
+    truncated = collect(to_device(t[:truncated][:,valid_indices]))
 
 
     
 
     if p.use_whole_delta_targets
-        #gae_deltas = rewards .+ critic2_values .* (1 .- terminal) .- values
+        #gae_deltas = rewards .+ critic2_values .* (1 .- terminated) .- values
 
         if !isnothing(AC.critic3)
 
@@ -916,7 +919,8 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
             γ,
             λ;
             dims=2,
-            terminal=terminal
+            terminated=terminated,
+            truncated=truncated
         )
     else
         advantages, returns = generalized_advantage_estimation(
@@ -926,7 +930,8 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
             γ,
             λ;
             dims=2,
-            terminal=terminal
+            terminated=terminated,
+            truncated=truncated
         )
     end
 
@@ -971,8 +976,8 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
 
     next_values = reshape( AC.critic( next_states ), n_envs, :)
     
-    #targets = lambda_truncated_targets(rewards, terminal, next_values, γ; λ = p.λ_targets, n = p.n_targets)[:]
-    targets = td_lambda_targets(rewards, terminal, next_values, γ; λ = p.λ_targets)[:]
+    #targets = lambda_truncated_targets(rewards, terminated, next_values, γ; λ = p.λ_targets, n = p.n_targets)[:]
+    targets = td_lambda_targets(rewards, terminated, truncated, next_values, γ; λ = p.λ_targets)[:]
 
     #targets for critic2 now below
 
@@ -1147,20 +1152,20 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
 
     #critic2_input = p.critic2_takes_action ? vcat(next_states, AC.actor.μ(next_states)) : next_states
     #next_critic2_values = reshape( AC.critic2( critic2_input ), n_envs, :)
-    #targets_critic2 = lambda_truncated_targets_ppo3(rewards, terminal, next_values, γ)[:]
+    #targets_critic2 = lambda_truncated_targets_ppo3(rewards, terminated, next_values, γ)[:]
     values = reshape( AC.critic( states ), n_envs, :)
     next_values = reshape( AC.critic( next_states ), n_envs, :)
-    #targets_critic2 = special_targets_ppo3(rewards, terminal, values, next_values, γ)[:]
-    #@show size(rewards), size(terminal), size(values), size(next_values)
+    #targets_critic2 = special_targets_ppo3(rewards, terminated, values, next_values, γ)[:]
+    #@show size(rewards), size(terminated), size(values), size(next_values)
 
 
 
     if p.use_whole_delta_targets
-        #@show size(rewards), size(terminal), size(values), size(next_values)
-        targets_critic2 = rewards + next_values .* γ .* (1 .- terminal) - values
+        #@show size(rewards), size(terminated), size(values), size(next_values)
+        targets_critic2 = rewards + next_values .* γ .* (1 .- terminated) - values
     else
-        #targets_critic2 = td_lambda_targets_ppo3(rewards, terminal, values, next_values, γ; λ = p.λ_targets)[:]
-        targets_critic2 = next_values .* (1 .- terminal)
+        #targets_critic2 = td_lambda_targets_ppo3(rewards, terminated, values, next_values, γ; λ = p.λ_targets)[:]
+        targets_critic2 = next_values .* (1 .- terminated)
     end
 
 
@@ -1203,7 +1208,7 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
 
             # nv′ = vec(next_values)[inds]
             # rew = vec(rewards)[inds]
-            # ter = vec(terminal)[inds]
+            # ter = vec(terminated)[inds]
 
             #tar = rew + γ * nv′ .* (1 .- ter)
             tar = vec(targets_critic2)[inds]
@@ -1287,9 +1292,9 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
 
         mean_c2 = antithetic_mean(AC.actor, c2, states_c3; K = p.antithetic_mean_samples)
 
-        targets_critic3 = reshape(mean_c2, n_envs, :) .* (1 .- terminal)
+        targets_critic3 = reshape(mean_c2, n_envs, :) .* (1 .- terminated)
 
-        #targets_critic3 = rewards + γ * critic2_values .* (1 .- terminal) - values
+        #targets_critic3 = rewards + γ * critic2_values .* (1 .- terminated) - values
 
         for epoch in 1:n_epochs
 
