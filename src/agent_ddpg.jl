@@ -48,7 +48,7 @@ end
 function create_agent(;action_space, state_space, use_gpu, rng, y, p, batch_size,
                     start_steps, start_policy, update_after, update_freq, update_loops = 1, reset_stage = POST_EPISODE_STAGE, act_limit,
                     act_noise, noise_hold = 1,
-                    nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, memory_size = 0, trajectory_length = 1000, mono = false, learning_rate = 0.001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, clip_grad = 0.5, betas = (0.9, 0.999))
+                    nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, memory_size = 0, trajectory_length = 1000, mono = false, learning_rate = 0.001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, clip_grad = 0.5, betas = (0.9, 0.999), verbose = false)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -105,6 +105,7 @@ function create_agent(;action_space, state_space, use_gpu, rng, y, p, batch_size
             noise_hold = noise_hold,
             last_noise = last_noise,
             memory_size = memory_size,
+            verbose = verbose,
         ),
         trajectory = 
             CircularArrayTrajectory(;
@@ -154,6 +155,7 @@ Base.@kwdef mutable struct CustomDDPGPolicy{
     noise_hold
     last_noise
     memory_size
+    verbose::Bool = false
 
     update_step::Int = 0
     actor_loss::Float32 = 0.0f0
@@ -338,9 +340,11 @@ function update!(policy::CustomDDPGPolicy, batch::NamedTuple{SARTS})
     s, a, r, terminated, snext = batch
 
     if isnothing(policy.actor_state_tree) || isnothing(policy.critic_state_tree)
-        println("________________________________________________________________________")
-        println("Reset Optimizers")
-        println("________________________________________________________________________")
+        if policy.verbose
+            println("________________________________________________________________________")
+            println("Reset Optimizers")
+            println("________________________________________________________________________")
+        end
         policy.actor_state_tree = Flux.setup(policy.optimizer_actor, policy.behavior_actor)
         policy.critic_state_tree = Flux.setup(policy.optimizer_critic, policy.behavior_critic)
     end

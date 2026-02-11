@@ -46,7 +46,7 @@ Base.@kwdef mutable struct PPOPolicy3{A,D,R} <: AbstractPolicy
     off_policy_update_freq = 0
     off_policy_batch_size = 256
 
-    verbose = true
+    verbose = false
 
     last_action_log_prob::Vector{Float32} = [0.0f0]
     last_sigma::Vector{Float32} = [0.0f0]
@@ -95,7 +95,7 @@ ResMLPBlock(width::Int) = ResMLPBlock(
 
 
 
-function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=nothing, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 0.1, fear_scale = 0.4, new_loss = true, dist = Normal, critic_frozen_update_freq = 4, actor_update_freq = 1, critic2_takes_action = true, use_popart = false, critic_frozen_factor = 0.1f0, λ_targets = 0.7f0, n_targets = 100, use_critic3 = false, use_exploration_module = false, use_whole_delta_targets = false, antithetic_mean_samples = 4, zero_mean_tether_factor = 0.8f0, verbose = true, trajectory_size = 100_000, off_policy_update_freq = 0, off_policy_batch_size = 256, )
+function create_agent_ppo3(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=nothing, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 0.1, fear_scale = 0.4, new_loss = true, dist = Normal, critic_frozen_update_freq = 4, actor_update_freq = 1, critic2_takes_action = true, use_popart = false, critic_frozen_factor = 0.1f0, λ_targets = 0.7f0, n_targets = 100, use_critic3 = false, use_exploration_module = false, use_whole_delta_targets = false, antithetic_mean_samples = 4, zero_mean_tether_factor = 0.8f0, verbose = false, trajectory_size = 100_000, off_policy_update_freq = 0, off_policy_batch_size = 256, )
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -806,9 +806,11 @@ function check_state_trees(p::PPOPolicy3)
     start_optimizers = isnothing(AC.actor_state_tree) || isnothing(AC.sigma_state_tree) || isnothing(AC.critic_state_tree) || isnothing(AC.critic2_state_tree)
 
     if start_optimizers || reset_optimizers
-        println("________________________________________________________________________")
-        println("Reset Optimizers")
-        println("________________________________________________________________________")
+        if p.verbose
+            println("________________________________________________________________________")
+            println("Reset Optimizers")
+            println("________________________________________________________________________")
+        end
         AC.actor_state_tree = Flux.setup(AC.optimizer_actor, AC.actor.μ)
         AC.sigma_state_tree = Flux.setup(AC.optimizer_sigma, AC.actor.logσ)
         AC.critic_state_tree = Flux.setup(AC.optimizer_critic, AC.critic)
@@ -1075,7 +1077,9 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
                     approx_kl_div = mean((ratio .- 1) - log.(ratio)) |> send_to_host
 
                     if approx_kl_div > p.target_kl
-                        println("Target KL overstepped: $(approx_kl_div) at epoch $(epoch), batch $(i)")
+                        if p.verbose
+                            println("Target KL overstepped: $(approx_kl_div) at epoch $(epoch), batch $(i)")
+                        end
                         stop_update = true
                     end
                 end
@@ -1357,6 +1361,7 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
     mean_entropy_loss = mean(abs.(entropy_losses))
     # mean_logσ_regularization_loss = mean(abs.(logσ_regularization_losses))
     # mean_critic_regularization_loss = mean(abs.(critic_regularization_losses))
+    q = finalize(collector; p_over_epochs=0.9, weighted=true)
     
     if p.verbose
         println("---")
@@ -1366,8 +1371,6 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
         println("mean entropy loss: $(mean_entropy_loss)")
         # println("mean logσ regularization loss: $(mean_logσ_regularization_loss)")
         # println("mean critic regularization loss: $(mean_critic_regularization_loss)")
-
-        q = finalize(collector; p_over_epochs=0.9, weighted=true)
 
         # q.q_eps   : 0.9-Quantil der (pro Batch) 0.9-Quantile von |r-1|
         # q.q_adv   : 0.9-Quantil der (pro Batch) 0.9-Quantile von |A|
@@ -1421,7 +1424,9 @@ function _update!(p::PPOPolicy3, t::Any; update_actor = true, update_critic = tr
         # println("changing entropy weight from $(w₃) to $(w₃*entropy_factor)")
         # println("changing logσ regularization weight from $(w₅) to $(w₅*logσ_regularization_factor)")
         # println("changing critic regularization weight from $(w₄) to $(w₄*critic_regularization_factor)")
-        println("changing fear factor from $(old_fear_factor) to $(λ_next)")
+        if p.verbose
+            println("changing fear factor from $(old_fear_factor) to $(λ_next)")
+        end
 
         # println("current critic_target is $(p.critic_target)")
 

@@ -160,7 +160,7 @@ function create_critic_PPO2(;ns, na, use_gpu, init, nna_scale, drop_middle_layer
 end
 
 
-function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=100, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, critic_regularization_loss_weight=0.01f0, logσ_regularization_loss_weight=0.01f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 1.0, fear_scale = 0.5, new_loss = true, use_exploration_module = false, )
+function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=100, normalize_advantage = false, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, critic_regularization_loss_weight=0.01f0, logσ_regularization_loss_weight=0.01f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, clip_range_vf = 0.2f0, noise = nothing, noise_scale = 90, fear_factor = 1.0, fear_scale = 0.5, new_loss = true, use_exploration_module = false, verbose = false, )
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -234,6 +234,7 @@ function create_agent_ppo2(;action_space, state_space, use_gpu, rng, y, p, updat
             new_loss = new_loss,
             mm = mm,
             use_exploration_module = use_exploration_module,
+            verbose = verbose,
         ),
         trajectory = 
         CircularArrayTrajectory(;
@@ -315,6 +316,7 @@ mutable struct PPOPolicy2{A<:ActorCritic2,D,R} <: AbstractPolicy
     use_exploration_module::Bool
     mm
     critic_target
+    verbose::Bool
     last_action_log_prob::Vector{Float32}
     last_sigma::Vector{Float32}
     last_mu::Vector{Float32}
@@ -356,6 +358,7 @@ function PPOPolicy2(;
     mm = ModulationModule(),
     use_exploration_module = false,
     critic_target = 0.0f0,
+    verbose = false,
 )
     PPOPolicy2{typeof(approximator),dist,typeof(rng)}(
         approximator,
@@ -392,6 +395,7 @@ function PPOPolicy2(;
         use_exploration_module,
         mm,
         critic_target,
+        verbose,
         [0.0],
         [0.0],
         [0.0],
@@ -791,9 +795,11 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
 
 
     if isnothing(AC.actor_state_tree) || isnothing(AC.sigma_state_tree) || isnothing(AC.critic_state_tree) || isnothing(AC.critic2_state_tree)
-        println("________________________________________________________________________")
-        println("Reset Optimizers")
-        println("________________________________________________________________________")
+        if p.verbose
+            println("________________________________________________________________________")
+            println("Reset Optimizers")
+            println("________________________________________________________________________")
+        end
         AC.actor_state_tree = Flux.setup(AC.optimizer_actor, AC.actor.μ)
         AC.sigma_state_tree = Flux.setup(AC.optimizer_sigma, AC.actor.logσ)
         AC.critic_state_tree = Flux.setup(AC.optimizer_critic, AC.critic)
@@ -890,7 +896,9 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
                     approx_kl_div = mean((ratio .- 1) - log.(ratio)) |> send_to_host
 
                     if approx_kl_div > p.target_kl
-                        println("Target KL overstepped: $(approx_kl_div) at epoch $(epoch), batch $(i)")
+                        if p.verbose
+                            println("Target KL overstepped: $(approx_kl_div) at epoch $(epoch), batch $(i)")
+                        end
                         stop_update = true
                     end
                 end
@@ -1032,7 +1040,9 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
     #println(p.update_step / p.update_freq)
 
     if (p.update_step / p.update_freq) % 4 == 0
-        println("CRITIC FROZEN UPDATE")
+        if p.verbose
+            println("CRITIC FROZEN UPDATE")
+        end
         AC.critic_frozen = deepcopy(AC.critic)
         AC.critic2_frozen = deepcopy(AC.critic2)
     end
@@ -1047,11 +1057,13 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
     # mean_logσ_regularization_loss = mean(abs.(logσ_regularization_losses))
     # mean_critic_regularization_loss = mean(abs.(critic_regularization_losses))
     
-    println("---")
-    println("mean actor loss: $(mean_actor_loss)")
-    println("mean critic loss: $(mean_critic_loss)")
-    println("mean critic2 loss: $(mean_critic2_loss)")
-    println("mean entropy loss: $(mean_entropy_loss)")
+    if p.verbose
+        println("---")
+        println("mean actor loss: $(mean_actor_loss)")
+        println("mean critic loss: $(mean_critic_loss)")
+        println("mean critic2 loss: $(mean_critic2_loss)")
+        println("mean entropy loss: $(mean_entropy_loss)")
+    end
     # println("mean logσ regularization loss: $(mean_logσ_regularization_loss)")
     # println("mean critic regularization loss: $(mean_critic_regularization_loss)")
 
@@ -1062,8 +1074,10 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
     # q.wq_eps  : A-gewichtetes 0.9-Quantil über die Batch-Quantile von |r-1|
 
     
-    println("0.9-Quantil excitement: $(q.q_adv)")
-    println("weighted 0.9-Quantil |r-1|: $(q.wq_eps)")
+    if p.verbose
+        println("0.9-Quantil excitement: $(q.q_adv)")
+        println("weighted 0.9-Quantil |r-1|: $(q.wq_eps)")
+    end
 
     if p.adaptive_weights && (p.update_step / p.update_freq) % 4 == 0
 
@@ -1107,7 +1121,9 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
         # println("changing entropy weight from $(w₃) to $(w₃*entropy_factor)")
         # println("changing logσ regularization weight from $(w₅) to $(w₅*logσ_regularization_factor)")
         # println("changing critic regularization weight from $(w₄) to $(w₄*critic_regularization_factor)")
-        println("changing fear factor from $(old_fear_factor) to $(λ_next)")
+        if p.verbose
+            println("changing fear factor from $(old_fear_factor) to $(λ_next)")
+        end
 
         # println("current critic_target is $(p.critic_target)")
 
@@ -1120,5 +1136,7 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
         
     end
 
-    println("---")
+    if p.verbose
+        println("---")
+    end
 end

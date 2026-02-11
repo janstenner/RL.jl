@@ -38,6 +38,7 @@ Base.@kwdef mutable struct SACPolicy <: AbstractPolicy
     rng =Random.GLOBAL_RNG
     device_rng =Random.GLOBAL_RNG
     use_popart = false
+    verbose::Bool = false
 
     # Logging
     last_reward_term::Float32 =0.0f0
@@ -53,7 +54,7 @@ Base.@kwdef mutable struct SACPolicy <: AbstractPolicy
 end
 
 
-function create_agent_sac(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 2.0f0, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false)
+function create_agent_sac(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 2.0f0, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false, verbose = false)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -112,7 +113,8 @@ function create_agent_sac(;action_space, state_space, use_gpu = false, rng, y, t
             target_entropy = target_entropy,
             rng = rng,
             device_rng = rng,
-            use_popart = use_popart
+            use_popart = use_popart,
+            verbose = verbose,
         ),
         trajectory = 
         CircularArrayTrajectory(;
@@ -260,9 +262,11 @@ function update!(p::SACPolicy, batch::NamedTuple{SARTTS})
 
 
     if isnothing(p.actor_state_tree) || isnothing(p.qnetwork1_state_tree) || isnothing(p.qnetwork2_state_tree)
-        println("________________________________________________________________________")
-        println("Reset Optimizers")
-        println("________________________________________________________________________")
+        if p.verbose
+            println("________________________________________________________________________")
+            println("Reset Optimizers")
+            println("________________________________________________________________________")
+        end
         p.actor_state_tree = Flux.setup(p.optimizer_actor, p.actor)
         p.qnetwork1_state_tree = Flux.setup(p.optimizer_qnetwork1, p.qnetwork1)
         p.qnetwork2_state_tree = Flux.setup(p.optimizer_qnetwork2, p.qnetwork2)
@@ -344,7 +348,7 @@ function update!(p::SACPolicy, batch::NamedTuple{SARTTS})
     end
 
 
-    if p.update_step % (p.update_freq * 100) == 0
+    if p.verbose && p.update_step % (p.update_freq * 100) == 0
         println("Reward Term = ",  p.last_reward_term)
         println("Entropy Term = ",  p.last_entropy_term)
 

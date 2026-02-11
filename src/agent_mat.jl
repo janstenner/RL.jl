@@ -372,8 +372,6 @@ Optimisers.init(o::CustomClipNorm, x::AbstractArray) = nothing
 function Optimisers.apply!(o::CustomClipNorm, state, x::AbstractArray{T}, dx) where T
     nrm = Optimisers._norm(dx, o.p)
 
-    println("The gradient norm is $(nrm)")
-
     if o.throw && !isfinite(nrm)
         throw(DomainError("gradient has $(o.p)-norm $nrm, for array $(summary(x))"))
     end
@@ -422,7 +420,7 @@ end
 (pe::SinCosPositionEmbed)(idxs::AbstractVector{<:Integer}) = @view pe.pe[:, idxs]
 
 
-function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = leakyrelu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false, customCrossAttention = true, one_by_one_training = false, clip_range = 0.2f0, tanh_end = false, positional_encoding = 1, useSeparateValueChain = false)
+function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = leakyrelu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false, customCrossAttention = true, one_by_one_training = false, clip_range = 0.2f0, tanh_end = false, positional_encoding = 1, useSeparateValueChain = false, verbose = false)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -575,6 +573,7 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
             target_kl = target_kl,
             jointPPO = jointPPO,
             one_by_one_training = one_by_one_training,
+            verbose = verbose,
         ),
         trajectory = 
         CircularArrayTrajectory(;
@@ -618,6 +617,7 @@ Base.@kwdef mutable struct MATPolicy <: AbstractPolicy
     start_steps = -1
     start_policy = nothing
     target_kl = 100.0
+    verbose::Bool = false
     last_action_log_prob::Vector{Float32} = [0.0]
     next_values::Vector{Float32} = [0.0]
     jointPPO::Bool = false
@@ -927,7 +927,9 @@ function _update!(p::MATPolicy, t::Any)
                     approx_kl_div = mean((ratio .- 1) - log.(ratio)) |> send_to_host
 
                     if approx_kl_div > p.target_kl && (i > 1 || epoch > 1) # only in second batch
-                        println("Target KL overstepped: $(approx_kl_div) at epoch $(epoch), batch $(i)")
+                        if p.verbose
+                            println("Target KL overstepped: $(approx_kl_div) at epoch $(epoch), batch $(i)")
+                        end
                         stop_update = true
                     end
                 end
@@ -1002,21 +1004,27 @@ function _update!(p::MATPolicy, t::Any)
 
     mean_actor_loss = mean(abs.(actor_losses))
     mean_critic_loss = mean(abs.(critic_losses))
-    println("---")
-    println(mean_actor_loss)
-    println(mean_critic_loss)
+    if p.verbose
+        println("---")
+        println(mean_actor_loss)
+        println(mean_critic_loss)
+    end
     
 
     if p.adaptive_weights
         actor_factor = clamp(0.5/mean_actor_loss, 0.9, 1.1)
         critic_factor = clamp(0.3/mean_critic_loss, 0.9, 1.1)
-        println("changing actor weight from $(w₁) to $(w₁*actor_factor)")
-        println("changing critic weight from $(w₂) to $(w₂*critic_factor)")
+        if p.verbose
+            println("changing actor weight from $(w₁) to $(w₁*actor_factor)")
+            println("changing critic weight from $(w₂) to $(w₂*critic_factor)")
+        end
         p.actor_loss_weight = w₁ * actor_factor
         p.critic_loss_weight = w₂ * critic_factor
     end
 
-    println("---")
+    if p.verbose
+        println("---")
+    end
 end
 
 
@@ -1036,7 +1044,9 @@ function test_update(apprentice::MATPolicy, batch, μ_expert)
         diff = μ - μ_expert
         mse = mean(diff.^2)
 
-        Zygote.@ignore println(mse)
+        if apprentice.verbose
+            Zygote.@ignore println(mse)
+        end
 
         return mse
     end
