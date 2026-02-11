@@ -720,4 +720,34 @@ function update!(p::SACPolicy2, batch::NamedTuple{SARTTS})
         p.target_qnetwork2[end].μ = (1 - τ) .* p.target_qnetwork2[end].μ .+ τ .* p.qnetwork2[end].μ
         p.target_qnetwork2[end].σ = (1 - τ) .* p.target_qnetwork2[end].σ .+ τ .* p.qnetwork2[end].σ
     end
+
+    p_grad = Flux.gradient(p.actor) do actor
+        aa, logp_π = actor(p.device_rng, s; is_sampling=true, is_return_log_prob=true)
+        q_input = vcat(s, aa)
+        q = min.(p.qnetwork1(q_input), p.qnetwork2(q_input))
+        reward = mean(q)
+        entropy = mean(logp_π)
+
+        ignore_derivatives() do
+            p.last_reward_term = reward
+            p.last_entropy_term = α * entropy
+            p.last_actor_loss = α * entropy - reward
+        end
+
+        α * entropy - reward
+    end
+    Flux.update!(p.actor_state_tree, p.actor, p_grad[1])
+
+    if p.automatic_entropy_tuning
+        log_α_grad = Flux.gradient(p.log_α) do log_α
+            exp(log_α[1]) .* mean(-logp_π′ .- p.target_entropy)
+        end
+
+        α_now = exp(p.log_α[1])
+        g_scaled = log_α_grad ./ max(α_now, 1f-12)
+        Flux.update!(p.log_α_state_tree, p.log_α, g_scaled[1])
+
+        clamp!(p.log_α, -12.5f0, 1.5f0)
+        p.α = exp.(p.log_α)[1]
+    end
 end
