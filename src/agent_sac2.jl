@@ -53,7 +53,8 @@ Base.@kwdef mutable struct SACPolicy2 <: AbstractPolicy
     verbose::Bool = false
 
     antithetic_mean_samples::Int = 16
-    on_policy_actor_loops::Int = 4
+    on_policy_n_batches::Int = 64
+    on_policy_epochs::Int = 3
 
     # Logging
     last_reward_term::Float32 =0.0f0
@@ -69,7 +70,7 @@ Base.@kwdef mutable struct SACPolicy2 <: AbstractPolicy
 end
 
 
-function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 7.0f0, min_σ = 2f-9, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false, critic_frozen_factor = 0.1f0, on_policy_update_freq = 2500, λ_targets= 0.7f0, fear_factor = 0.1f0, target_frac = 0.3f0, verbose = false, antithetic_mean_samples = 16, on_policy_actor_loops = 4)
+function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 7.0f0, min_σ = 2f-9, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false, critic_frozen_factor = 0.1f0, on_policy_update_freq = 2500, λ_targets= 0.7f0, fear_factor = 0.1f0, target_frac = 0.3f0, verbose = false, antithetic_mean_samples = 16, on_policy_n_batches = 64, on_policy_epochs = 3)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
@@ -149,7 +150,8 @@ function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, 
             verbose = verbose,
 
             antithetic_mean_samples = antithetic_mean_samples,
-            on_policy_actor_loops = on_policy_actor_loops,
+            on_policy_n_batches = on_policy_n_batches,
+            on_policy_epochs = on_policy_epochs,
         ),
         trajectory = 
         CircularArrayTrajectory(;
@@ -415,165 +417,148 @@ function on_policy_update(p::SACPolicy2, traj::AbstractTrajectory; whole_traject
     
     targets = td_lambda_targets(r, ter, trun, next_values, γ; λ = p.λ_targets)
 
-    q_input = vcat(s, a)
+    n_total = length(targets)
+    n_batches = max(1, min(p.on_policy_n_batches, n_total))
+    microbatch_size = Int(floor(n_total ÷ n_batches))
 
-    q_grad_1 = Flux.gradient(p.qnetwork1) do qnetwork1
-        q1 = dropdims(qnetwork1(q_input), dims=1)
+    D = device(p.qnetwork1)
+    to_device(x) = send_to_device(D, x)
 
-        ignore_derivatives() do
-            p.last_q1_mean = mean(q1)
-            p.last_critic1_loss = Flux.mse(q1, targets)
-        end
-
-        Flux.mse(q1, targets)
-    end
-    Flux.update!(p.qnetwork1_state_tree, p.qnetwork1, q_grad_1[1])
-    if p.use_popart
-        update!(p.qnetwork1.layers[end], targets) 
-    end
-
-    q_grad_2 = Flux.gradient(p.qnetwork2) do qnetwork2
-        q2 = dropdims(qnetwork2(q_input), dims=1)
-
-        ignore_derivatives() do
-            p.last_q2_mean = mean(q2)
-            p.last_critic2_loss = Flux.mse(q2, targets)
-        end
-
-        Flux.mse(q2, targets)
-    end
-    Flux.update!(p.qnetwork2_state_tree, p.qnetwork2, q_grad_2[1])
-    if p.use_popart
-        update!(p.qnetwork2.layers[end], targets) 
-    end
-
-
-    # polyak averaging
-    for (dest, src) in zip(
-        Flux.params([p.target_qnetwork1, p.target_qnetwork2]),
-        Flux.params([p.qnetwork1, p.qnetwork2]),
-    )
-        dest .= (1 - τ) .* dest .+ τ .* src
-    end
-
-
-    if p.use_popart
-        # PopArt Polyak
-        p.target_qnetwork1[end].μ = (1 - τ) .* p.target_qnetwork1[end].μ .+ τ .* p.qnetwork1[end].μ
-        p.target_qnetwork1[end].σ = (1 - τ) .* p.target_qnetwork1[end].σ .+ τ .* p.qnetwork1[end].σ
-        p.target_qnetwork2[end].μ = (1 - τ) .* p.target_qnetwork2[end].μ .+ τ .* p.qnetwork2[end].μ
-        p.target_qnetwork2[end].σ = (1 - τ) .* p.target_qnetwork2[end].σ .+ τ .* p.qnetwork2[end].σ
-    end
-
-
-
-
+    states_flatten_on_host = flatten_batch(send_to_host(s))
+    actions_flatten_on_host = flatten_batch(send_to_host(a))
+    targets_flatten_on_host = vec(send_to_host(targets))
 
     # on policy actor update
+    if p.target_frac < 1.0f0
+        target_frac = p.target_frac
+        τ_change = 3f-4
+        μ_before, logσ_before = p.actor(p.device_rng, s)
+        μ_before_flatten_on_host = flatten_batch(send_to_host(μ_before))
+        logσ_before_flatten_on_host = flatten_batch(send_to_host(logσ_before))
+    end
 
-    target_frac = p.target_frac #Float32(1.0/n_samples)
-    τ_change = 3f-4
+    for epoch in 1:p.on_policy_epochs
+        rand_inds = shuffle!(p.rng, Vector(1:n_total))
+        for i in 1:n_batches
+            first_ind = (i - 1) * microbatch_size + 1
+            first_ind > n_total && break
+            last_ind = i == n_batches ? n_total : min(i * microbatch_size, n_total)
+            inds = rand_inds[first_ind:last_ind]
 
-    μ_before, logσ_before = p.actor(p.device_rng, s)
+            s_batch = to_device(collect(select_last_dim(states_flatten_on_host, inds)))
+            a_batch = to_device(collect(select_last_dim(actions_flatten_on_host, inds)))
+            target_batch = to_device(Float32.(targets_flatten_on_host[inds]))
+            target_batch_popart = reshape(target_batch, 1, :)
 
+            q_input_batch = vcat(s_batch, a_batch)
 
-    # acc_mags  = antithetic_mean_sac2(p, s, α; use_grad_a_q_norms = true)
+            q_grad_1 = Flux.gradient(p.qnetwork1) do qnetwork1
+                q1 = dropdims(qnetwork1(q_input_batch), dims=1)
 
-    # w = q_rank_mask(acc_mags; target_frac=target_frac)
+                ignore_derivatives() do
+                    p.last_q1_mean = mean(q1)
+                    p.last_critic1_loss = Flux.mse(q1, target_batch)
+                end
 
-    # actor_inds = findall(x -> x<0.5, w)
-    # fear_inds = findall(x -> x>=0.5, w)
-
-
-    for i in 1:p.on_policy_actor_loops
-        # Train Policy
-        p_grad = Flux.gradient(p.actor) do actor
-            aa, logp_π, μ, logσ = actor(p.device_rng, s; is_sampling=true, is_return_log_prob=true, is_return_params=true)
-            q_input = vcat(s, aa)
-            q = min.(p.qnetwork1(q_input), p.qnetwork2(q_input))
-            reward = mean(q)
-            entropy = mean(logp_π)
-
-            ignore_derivatives() do
-                p.last_reward_term = reward
-                p.last_entropy_term = α * entropy
-                p.last_actor_loss = α * entropy - reward
-
+                Flux.mse(q1, target_batch)
+            end
+            Flux.update!(p.qnetwork1_state_tree, p.qnetwork1, q_grad_1[1])
+            if p.use_popart
+                update!(p.qnetwork1.layers[end], target_batch_popart)
             end
 
+            q_grad_2 = Flux.gradient(p.qnetwork2) do qnetwork2
+                q2 = dropdims(qnetwork2(q_input_batch), dims=1)
 
-            # KL(new || old) für diagonale Gauß-Policy, pro Sample
-            σ2   = exp.(2f0 .* logσ)
-            σ0_2 = exp.(2f0 .* logσ_before)
-            t1 = (σ2 ./ σ0_2)
-            t2 = ((μ .- μ_before).^2) ./ σ0_2
-            KLs = vec(sum(0.5f0 .* (t1 .+ t2 .- 1f0 .+ 2f0 .* (logσ_before .- logσ)); dims=1))
-            KLs = Float32.(KLs)
+                ignore_derivatives() do
+                    p.last_q2_mean = mean(q2)
+                    p.last_critic2_loss = Flux.mse(q2, target_batch)
+                end
 
-            # weiche 70/30-Maske aus Q-Rängen (stopgrad)
-            # w = ignore_derivatives() do
-            #     # q_host = collect(Float32.(q))[:]
-            #     # q_rank_mask(q_host; target_frac=target_frac)
-
-            #     mags = grad_a_q_norms(p.qnetwork1, p.qnetwork2, s, aa)
-            #     q_rank_mask(mags; target_frac=target_frac)
-            # end
-
-            #@show w
-
-            # fear_term = p.fear_factor * mean(w .* KLs)
-
-
-            # new experimental loss
-
-            # actor_inds = findall(x -> x<0.5, w)
-            # fear_inds = findall(x -> x>=0.5, w)
-
-            # if (length(actor_inds) / length(w)) - target_frac > 0.05
-            #     @show length(actor_inds) / length(w)
-            # end
-
-            #reward = mean(q[actor_inds])
-            #entropy = mean(logp_π[actor_inds])
-
-            # fear_term = p.fear_factor * mean(KLs[fear_inds])
-            # fear_term = p.fear_factor * mean((μ .- μ_before).^2) # only mean value
-            if p.target_frac != 1.0f0
-                fear_term = p.fear_factor * mean(KLs)
-            else
-                fear_term = 0.0f0
+                Flux.mse(q2, target_batch)
+            end
+            Flux.update!(p.qnetwork2_state_tree, p.qnetwork2, q_grad_2[1])
+            if p.use_popart
+                update!(p.qnetwork2.layers[end], target_batch_popart)
             end
 
-            #@show target_frac, length(actor_inds), length(fear_inds)
+            # polyak averaging
+            for (dest, src) in zip(
+                Flux.params([p.target_qnetwork1, p.target_qnetwork2]),
+                Flux.params([p.qnetwork1, p.qnetwork2]),
+            )
+                dest .= (1 - τ) .* dest .+ τ .* src
+            end
 
-            actor_term = α * entropy - reward
+            if p.use_popart
+                # PopArt Polyak
+                p.target_qnetwork1[end].μ = (1 - τ) .* p.target_qnetwork1[end].μ .+ τ .* p.qnetwork1[end].μ
+                p.target_qnetwork1[end].σ = (1 - τ) .* p.target_qnetwork1[end].σ .+ τ .* p.qnetwork1[end].σ
+                p.target_qnetwork2[end].μ = (1 - τ) .* p.target_qnetwork2[end].μ .+ τ .* p.qnetwork2[end].μ
+                p.target_qnetwork2[end].σ = (1 - τ) .* p.target_qnetwork2[end].σ .+ τ .* p.qnetwork2[end].σ
+            end
 
-            loss = actor_term + fear_term
+            if p.target_frac < 1.0f0
+                μ_before_batch = to_device(collect(select_last_dim(μ_before_flatten_on_host, inds)))
+                logσ_before_batch = to_device(collect(select_last_dim(logσ_before_flatten_on_host, inds)))
+            end
 
-            loss
+            p_grad = Flux.gradient(p.actor) do actor
+                aa, logp_π, μ, logσ = actor(p.device_rng, s_batch; is_sampling=true, is_return_log_prob=true, is_return_params=true)
+                q_input = vcat(s_batch, aa)
+                q = min.(p.qnetwork1(q_input), p.qnetwork2(q_input))
+                reward = mean(q)
+                entropy = mean(logp_π)
+
+                ignore_derivatives() do
+                    p.last_reward_term = reward
+                    p.last_entropy_term = α * entropy
+                    p.last_actor_loss = α * entropy - reward
+                end
+
+                if p.target_frac < 1.0f0
+                    # KL(new || old) for diagonal Gaussian policy, per-sample.
+                    σ2   = exp.(2f0 .* logσ)
+                    σ0_2 = exp.(2f0 .* logσ_before_batch)
+                    t1 = (σ2 ./ σ0_2)
+                    t2 = ((μ .- μ_before_batch).^2) ./ σ0_2
+                    KLs = vec(sum(0.5f0 .* (t1 .+ t2 .- 1f0 .+ 2f0 .* (logσ_before_batch .- logσ)); dims=1))
+                    KLs = Float32.(KLs)
+
+                    fear_term = p.fear_factor * mean(KLs)
+                else
+                    fear_term = 0.0f0
+                end
+
+
+                actor_term = α * entropy - reward
+                actor_term + fear_term
+            end
+            Flux.update!(p.actor_state_tree, p.actor, p_grad[1])
         end
-        Flux.update!(p.actor_state_tree, p.actor, p_grad[1])
     end
 
 
-    μ_new, logσ_new = p.actor(p.device_rng, s)
+    if p.target_frac < 1.0f0
+        μ_new, logσ_new = p.actor(p.device_rng, s)
 
-    σ2   = exp.(2f0 .* logσ_new)
-    σ0_2 = exp.(2f0 .* logσ_before)
-    t1 = (σ2 ./ σ0_2)
-    t2 = ((μ_new .- μ_before).^2) ./ σ0_2
-    KLs = vec(sum(0.5f0 .* (t1 .+ t2 .- 1f0 .+ 2f0 .* (logσ_before .- logσ_new)); dims=1))
-    KLs = Float32.(KLs)
+        σ2   = exp.(2f0 .* logσ_new)
+        σ0_2 = exp.(2f0 .* logσ_before)
+        t1 = (σ2 ./ σ0_2)
+        t2 = ((μ_new .- μ_before).^2) ./ σ0_2
+        KLs = vec(sum(0.5f0 .* (t1 .+ t2 .- 1f0 .+ 2f0 .* (logσ_before .- logσ_new)); dims=1))
+        KLs = Float32.(KLs)
 
-    frac_changed = mean(KLs .> τ_change)
-    ff_before = deepcopy(p.fear_factor)
-    p.fear_factor = adjust_fear_factor(p.fear_factor, frac_changed; target=target_frac)
+        frac_changed = mean(KLs .> τ_change)
+        ff_before = deepcopy(p.fear_factor)
+        p.fear_factor = adjust_fear_factor(p.fear_factor, frac_changed; target=target_frac)
 
-    if p.verbose
-        #@show p.fear_factor - ff_before
-        @show mean(logσ_before), mean(logσ_new), mean(μ_before), mean(μ_new)
-        @show frac_changed
-        @show p.fear_factor
+        if p.verbose
+            #@show p.fear_factor - ff_before
+            @show mean(logσ_before), mean(logσ_new), mean(μ_before), mean(μ_new)
+            @show frac_changed
+            @show p.fear_factor
+        end
     end
 
     # Tune entropy automatically
