@@ -344,7 +344,7 @@ function update!(p::SACPolicy, batch::NamedTuple{SARTTS})
         end
         Flux.update!(p.log_α_state_tree, p.log_α, log_α_grad[1])
 
-        clamp!(p.log_α, -6.5, Inf)
+        clamp!(p.log_α, -12.5f0, 1.5f0)
 
         p.α = exp.(p.log_α)[1]
 
