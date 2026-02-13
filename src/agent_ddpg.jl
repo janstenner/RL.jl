@@ -1,33 +1,26 @@
-function create_NNA(;na, ns, use_gpu, is_actor, init, copyfrom = nothing, nna_scale, drop_middle_layer, learning_rate = 0.001, fun = relu)
+function create_NNA(;na, ns, use_gpu, is_actor, init, copyfrom = nothing, nna_scale, network_depth = 2, drop_middle_layer = nothing, learning_rate = 0.001, fun = relu)
+    if !isnothing(drop_middle_layer)
+        network_depth = drop_middle_layer ? 1 : 2
+    end
+    network_depth = max(1, Int(network_depth))
+
     nna_size_actor = Int(floor(10 * nna_scale))
     nna_size_critic = Int(floor(20 * nna_scale))
 
     if is_actor
-        if drop_middle_layer
-            n = Chain(
-                Dense(ns, nna_size_actor, fun; init = init),
-                Dense(nna_size_actor, na, tanh; init = init),
-            )
-        else
-            n = Chain(
-                Dense(ns, nna_size_actor, fun; init = init),
-                Dense(nna_size_actor, nna_size_actor, fun; init = init),
-                Dense(nna_size_actor, na, tanh; init = init),
-            )
+        layers = Any[Dense(ns, nna_size_actor, fun; init = init)]
+        for _ in 2:network_depth
+            push!(layers, Dense(nna_size_actor, nna_size_actor, fun; init = init))
         end
+        push!(layers, Dense(nna_size_actor, na, tanh; init = init))
+        n = Chain(layers...)
     else
-        if drop_middle_layer
-            n = Chain(
-                Dense(ns + na, nna_size_critic, fun; init = init),
-                Dense(nna_size_critic, 1; init = init),
-            )
-        else
-            n = Chain(
-                Dense(ns + na, nna_size_critic, fun; init = init),
-                Dense(nna_size_critic, nna_size_critic, fun; init = init),
-                Dense(nna_size_critic, 1; init = init),
-            )
+        layers = Any[Dense(ns + na, nna_size_critic, fun; init = init)]
+        for _ in 2:network_depth
+            push!(layers, Dense(nna_size_critic, nna_size_critic, fun; init = init))
         end
+        push!(layers, Dense(nna_size_critic, 1; init = init))
+        n = Chain(layers...)
     end
 
     # nna = CustomNeuralNetworkApproximator(
@@ -48,18 +41,22 @@ end
 function create_agent(;action_space, state_space, use_gpu, rng, y, p, batch_size,
                     start_steps, start_policy, update_after, update_freq, update_loops = 1, reset_stage = POST_EPISODE_STAGE, act_limit,
                     act_noise, noise_hold = 1,
-                    nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, memory_size = 0, trajectory_length = 1000, mono = false, learning_rate = 0.001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, clip_grad = 0.5, betas = (0.9, 0.999), verbose = false)
+                    nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, memory_size = 0, trajectory_length = 1000, mono = false, learning_rate = 0.001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, clip_grad = 0.5, betas = (0.9, 0.999), verbose = false)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
-    isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
+    !isnothing(drop_middle_layer)        &&  (network_depth = drop_middle_layer ? 1 : 2)
+    !isnothing(drop_middle_layer_critic) &&  (network_depth_critic = drop_middle_layer_critic ? 1 : 2)
+    isnothing(network_depth_critic)      &&  (network_depth_critic = network_depth)
+    network_depth = max(1, Int(network_depth))
+    network_depth_critic = max(1, Int(network_depth_critic))
     isnothing(fun_critic)               &&  (fun_critic = fun)
     isnothing(learning_rate_critic)     &&  (learning_rate_critic = learning_rate)
     
     init = Flux.glorot_uniform(rng)
     
-    behavior_actor = create_NNA(na = size(action_space)[1], ns = size(state_space)[1], use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, learning_rate = learning_rate, fun = fun)
+    behavior_actor = create_NNA(na = size(action_space)[1], ns = size(state_space)[1], use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, network_depth = network_depth, learning_rate = learning_rate, fun = fun)
 
-    behavior_critic = create_NNA(na = size(action_space)[1], ns = size(state_space)[1], use_gpu = use_gpu, is_actor = false, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, learning_rate = learning_rate_critic, fun = fun_critic)
+    behavior_critic = create_NNA(na = size(action_space)[1], ns = size(state_space)[1], use_gpu = use_gpu, is_actor = false, init = init, nna_scale = nna_scale_critic, network_depth = network_depth_critic, learning_rate = learning_rate_critic, fun = fun_critic)
 
 
     target_actor = deepcopy(behavior_actor)

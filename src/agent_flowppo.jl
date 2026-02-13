@@ -163,10 +163,14 @@ end
 
 
 
-function create_agent_flow_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=nothing, normalize_advantage = true, logσ_is_network = true, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, noise = nothing, noise_scale = 90, dist = Normal, actor_update_freq = 1, λ_targets = 0.7f0, n_targets = 100, use_exploration_module = false, antithetic_mean_samples = 4, verbose = false, trajectory_size = 100_000, off_policy_update_freq = 0, off_policy_batch_size = 256, )
+function create_agent_flow_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 2000, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 10, n_microbatches = 1, actorbatch_size=nothing, normalize_advantage = true, logσ_is_network = true, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, noise = nothing, noise_scale = 90, dist = Normal, actor_update_freq = 1, λ_targets = 0.7f0, n_targets = 100, use_exploration_module = false, antithetic_mean_samples = 4, verbose = false, trajectory_size = 100_000, off_policy_update_freq = 0, off_policy_batch_size = 256, )
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
-    isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
+    !isnothing(drop_middle_layer)        &&  (network_depth = drop_middle_layer ? 1 : 2)
+    !isnothing(drop_middle_layer_critic) &&  (network_depth_critic = drop_middle_layer_critic ? 1 : 2)
+    isnothing(network_depth_critic)      &&  (network_depth_critic = network_depth)
+    network_depth = max(1, Int(network_depth))
+    network_depth_critic = max(1, Int(network_depth_critic))
     isnothing(fun_critic)               &&  (fun_critic = fun)
     isnothing(learning_rate_critic)     &&  (learning_rate_critic = learning_rate)
 
@@ -196,8 +200,8 @@ function create_agent_flow_ppo(;action_space, state_space, use_gpu, rng, y, p, u
 
     approximator = isnothing(approximator) ? FlowActorCritic(
                 actor = GaussianNetwork(
-                    μ = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = tanh_end),
-                    logσ = create_logσ(logσ_is_network = logσ_is_network, ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, start_logσ = start_logσ),
+                    μ = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, network_depth = network_depth, fun = fun, tanh_end = tanh_end),
+                    logσ = create_logσ(logσ_is_network = logσ_is_network, ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, network_depth = network_depth, fun = fun, start_logσ = start_logσ),
                     logσ_is_network = logσ_is_network,
                     max_σ = max_σ
                 ),

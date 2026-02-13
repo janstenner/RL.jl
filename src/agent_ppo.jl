@@ -1,48 +1,38 @@
-function create_chain(;ns, na, use_gpu, is_actor, init, nna_scale, drop_middle_layer, fun = relu, tanh_end = false)
+function create_chain(;
+    ns,
+    na,
+    use_gpu,
+    is_actor,
+    init,
+    nna_scale,
+    network_depth = 2,
+    drop_middle_layer = nothing,
+    fun = relu,
+    tanh_end = false
+)
+    if !isnothing(drop_middle_layer)
+        network_depth = drop_middle_layer ? 1 : 2
+    end
+    network_depth = max(1, Int(network_depth))
+
     nna_size_actor = Int(floor(10 * nna_scale))
     nna_size_critic = Int(floor(20 * nna_scale))
 
     if is_actor
-        if tanh_end
-            if drop_middle_layer
-                n = Chain(
-                    Dense(ns, nna_size_actor, fun; init = init),
-                    Dense(nna_size_actor, na, tanh; init = init)
-                )
-            else
-                n = Chain(
-                    Dense(ns, nna_size_actor, fun; init = init),
-                    Dense(nna_size_actor, nna_size_actor, fun; init = init),
-                    Dense(nna_size_actor, na, tanh; init = init)
-                )
-            end
-        else
-            if drop_middle_layer
-                n = Chain(
-                    Dense(ns, nna_size_actor, fun; init = init),
-                    Dense(nna_size_actor, na; init = init)
-                )
-            else
-                n = Chain(
-                    Dense(ns, nna_size_actor, fun; init = init),
-                    Dense(nna_size_actor, nna_size_actor, fun; init = init),
-                    Dense(nna_size_actor, na; init = init)
-                )
-            end
+        layers = Any[Dense(ns, nna_size_actor, fun; init = init)]
+        for _ in 2:network_depth
+            push!(layers, Dense(nna_size_actor, nna_size_actor, fun; init = init))
         end
+        output_fun = tanh_end ? tanh : identity
+        push!(layers, Dense(nna_size_actor, na, output_fun; init = init))
+        n = Chain(layers...)
     else
-        if drop_middle_layer
-            n = Chain(
-                Dense(ns, nna_size_critic, fun; init = init),
-                Dense(nna_size_critic, 1; init = init),
-            )
-        else
-            n = Chain(
-                Dense(ns, nna_size_critic, fun; init = init),
-                Dense(nna_size_critic, nna_size_critic, fun; init = init),
-                Dense(nna_size_critic, 1; init = init),
-            )
+        layers = Any[Dense(ns, nna_size_critic, fun; init = init)]
+        for _ in 2:network_depth
+            push!(layers, Dense(nna_size_critic, nna_size_critic, fun; init = init))
         end
+        push!(layers, Dense(nna_size_critic, 1; init = init))
+        n = Chain(layers...)
     end
 
     model = use_gpu ? n |> gpu : n
@@ -50,23 +40,23 @@ function create_chain(;ns, na, use_gpu, is_actor, init, nna_scale, drop_middle_l
     model
 end
 
-function create_logσ(;logσ_is_network, ns, na, use_gpu, init, nna_scale, drop_middle_layer, fun = relu, start_logσ = 0.0)
+function create_logσ(;logσ_is_network, ns, na, use_gpu, init, nna_scale, network_depth = 2, drop_middle_layer = nothing, fun = relu, start_logσ = 0.0)
 
     res = nothing
 
     if logσ_is_network
-        # res = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = false)
-
-        nna_size = Int(floor(10 * nna_scale))
-
-        res = Chain(
-            Dense(ns, nna_size, relu, bias = false),
-            Dense(nna_size, na, identity, bias = false)
+        res = create_chain(
+            ns = ns,
+            na = na,
+            use_gpu = use_gpu,
+            is_actor = true,
+            init = init,
+            nna_scale = nna_scale,
+            network_depth = network_depth,
+            drop_middle_layer = drop_middle_layer,
+            fun = fun,
+            tanh_end = false
         )
-
-        res.layers[1].weight[:] .*= 0.2
-        res.layers[2].weight[:] .*= 0.2
-        res.layers[2].weight[:] = -(abs.(res.layers[2].weight[:]))
     else
         res = Matrix(Matrix(Float32.(ones(na) .* start_logσ)')')
     end
@@ -76,10 +66,14 @@ function create_logσ(;logσ_is_network, ns, na, use_gpu, init, nna_scale, drop_
     return res
 end
 
-function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, noise = nothing, noise_scale = 90, clip_range_vf = nothing, verbose = false)
+function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, noise = nothing, noise_scale = 90, clip_range_vf = nothing, verbose = false)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
-    isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
+    !isnothing(drop_middle_layer)        &&  (network_depth = drop_middle_layer ? 1 : 2)
+    !isnothing(drop_middle_layer_critic) &&  (network_depth_critic = drop_middle_layer_critic ? 1 : 2)
+    isnothing(network_depth_critic)      &&  (network_depth_critic = network_depth)
+    network_depth = max(1, Int(network_depth))
+    network_depth_critic = max(1, Int(network_depth_critic))
     isnothing(fun_critic)               &&  (fun_critic = fun)
     isnothing(learning_rate_critic)     &&  (learning_rate_critic = learning_rate)
 
@@ -98,12 +92,12 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
         policy = PPOPolicy(
             approximator = isnothing(approximator) ? ActorCritic(
                 actor = GaussianNetwork(
-                    μ = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = tanh_end),
-                    logσ = create_logσ(logσ_is_network = logσ_is_network, ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, start_logσ = start_logσ),
+                    μ = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, network_depth = network_depth, fun = fun, tanh_end = tanh_end),
+                    logσ = create_logσ(logσ_is_network = logσ_is_network, ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, network_depth = network_depth, fun = fun, start_logσ = start_logσ),
                     logσ_is_network = logσ_is_network,
                     max_σ = max_σ
                 ),
-                critic = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = false, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic),
+                critic = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = false, init = init, nna_scale = nna_scale_critic, network_depth = network_depth_critic, fun = fun_critic),
                 optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
                 optimizer_critic = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate_critic, betas)),
             ) : approximator,

@@ -70,10 +70,14 @@ Base.@kwdef mutable struct SACPolicy2 <: AbstractPolicy
 end
 
 
-function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 7.0f0, min_σ = 2f-9, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false, critic_frozen_factor = 0.1f0, on_policy_update_freq = 2500, λ_targets= 0.7f0, fear_factor = 0.1f0, target_frac = 0.3f0, verbose = false, antithetic_mean_samples = 16, on_policy_n_batches = 64, on_policy_epochs = 3)
+function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 7.0f0, min_σ = 2f-9, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false, critic_frozen_factor = 0.1f0, on_policy_update_freq = 2500, λ_targets= 0.7f0, fear_factor = 0.1f0, target_frac = 0.3f0, verbose = false, antithetic_mean_samples = 16, on_policy_n_batches = 64, on_policy_epochs = 3)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
-    isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
+    !isnothing(drop_middle_layer)        &&  (network_depth = drop_middle_layer ? 1 : 2)
+    !isnothing(drop_middle_layer_critic) &&  (network_depth_critic = drop_middle_layer_critic ? 1 : 2)
+    isnothing(network_depth_critic)      &&  (network_depth_critic = network_depth)
+    network_depth = max(1, Int(network_depth))
+    network_depth_critic = max(1, Int(network_depth_critic))
     isnothing(fun_critic)               &&  (fun_critic = fun)
     isnothing(learning_rate_critic)     &&  (learning_rate_critic = learning_rate)
 
@@ -87,21 +91,21 @@ function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, 
     isnothing(lr_alpha)                 && (lr_alpha = Float32(learning_rate))
 
 
-    qnetwork1 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic, is_critic2 = true, popart = use_popart)
+    qnetwork1 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, network_depth = network_depth_critic, fun = fun_critic, is_critic2 = true, popart = use_popart)
     target_qnetwork1 = deepcopy(qnetwork1)
 
-    qnetwork2 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic, is_critic2 = true, popart = use_popart)
+    qnetwork2 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, network_depth = network_depth_critic, fun = fun_critic, is_critic2 = true, popart = use_popart)
     target_qnetwork2 = deepcopy(qnetwork2)
 
-    critic = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, drop_middle_layer = drop_middle_layer_critic, fun = fun_critic, popart = use_popart)
+    critic = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, network_depth = network_depth_critic, fun = fun_critic, popart = use_popart)
 
     critic_frozen = deepcopy(critic)
 
     Agent(
         policy = SACPolicy2(
            actor = GaussianNetwork(
-                    μ = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = tanh_end),
-                    logσ = create_logσ(logσ_is_network = logσ_is_network, ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, start_logσ = start_logσ),
+                    μ = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, network_depth = network_depth, fun = fun, tanh_end = tanh_end),
+                    logσ = create_logσ(logσ_is_network = logσ_is_network, ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, network_depth = network_depth, fun = fun, start_logσ = start_logσ),
                     logσ_is_network = logσ_is_network,
                     max_σ = max_σ,
                     min_σ = min_σ,

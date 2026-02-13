@@ -292,51 +292,41 @@ end
 
 
 
-function create_chain_mat(;ns, na, use_gpu, is_actor, init, nna_scale, drop_middle_layer, fun = relu, tanh_end = false)
+function create_chain_mat(;
+    ns,
+    na,
+    use_gpu,
+    is_actor,
+    init,
+    nna_scale,
+    network_depth = 2,
+    drop_middle_layer = nothing,
+    fun = relu,
+    tanh_end = false
+)
+    if !isnothing(drop_middle_layer)
+        network_depth = drop_middle_layer ? 1 : 2
+    end
+    network_depth = max(1, Int(network_depth))
+
     nna_size_actor = Int(floor(10 * nna_scale))
     nna_size_critic = Int(floor(20 * nna_scale))
 
     if is_actor
-        if tanh_end
-            if drop_middle_layer
-                n = Chain(
-                    Dense(ns, nna_size_actor, fun; init = init),
-                    Dense(nna_size_actor, na, tanh; init = init)
-                )
-            else
-                n = Chain(
-                    Dense(ns, nna_size_actor, fun; init = init),
-                    Dense(nna_size_actor, nna_size_actor, fun; init = init),
-                    Dense(nna_size_actor, na, tanh; init = init)
-                )
-            end
-        else
-            if drop_middle_layer
-                n = Chain(
-                    Dense(ns, nna_size_actor, fun; init = init),
-                    Dense(nna_size_actor, na; init = init)
-                )
-            else
-                n = Chain(
-                    Dense(ns, nna_size_actor, fun; init = init),
-                    Dense(nna_size_actor, nna_size_actor, fun; init = init),
-                    Dense(nna_size_actor, na; init = init)
-                )
-            end
+        layers = Any[Dense(ns, nna_size_actor, fun; init = init)]
+        for _ in 2:network_depth
+            push!(layers, Dense(nna_size_actor, nna_size_actor, fun; init = init))
         end
+        output_fun = tanh_end ? tanh : identity
+        push!(layers, Dense(nna_size_actor, na, output_fun; init = init))
+        n = Chain(layers...)
     else
-        if drop_middle_layer
-            n = Chain(
-                Dense(ns, nna_size_critic, fun; init = init),
-                Dense(nna_size_critic, 1; init = init),
-            )
-        else
-            n = Chain(
-                Dense(ns, nna_size_critic, fun; init = init),
-                Dense(nna_size_critic, nna_size_critic, fun; init = init),
-                Dense(nna_size_critic, 1; init = init),
-            )
+        layers = Any[Dense(ns, nna_size_critic, fun; init = init)]
+        for _ in 2:network_depth
+            push!(layers, Dense(nna_size_critic, nna_size_critic, fun; init = init))
         end
+        push!(layers, Dense(nna_size_critic, 1; init = init))
+        n = Chain(layers...)
     end
 
     model = use_gpu ? n |> gpu : n
@@ -344,12 +334,12 @@ function create_chain_mat(;ns, na, use_gpu, is_actor, init, nna_scale, drop_midd
     model
 end
 
-function create_logσ_mat(;logσ_is_network, ns, na, use_gpu, init, nna_scale, drop_middle_layer, fun = relu, start_logσ = 0.0)
+function create_logσ_mat(;logσ_is_network, ns, na, use_gpu, init, nna_scale, network_depth = 2, drop_middle_layer = nothing, fun = relu, start_logσ = 0.0)
 
     res = nothing
 
     if logσ_is_network
-        res = create_chain_mat(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = false)
+        res = create_chain_mat(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, network_depth = network_depth, drop_middle_layer = drop_middle_layer, fun = fun, tanh_end = false)
     else
         res = Matrix(Matrix(Float32.(ones(na) .* start_logσ)')')
     end
@@ -420,10 +410,14 @@ end
 (pe::SinCosPositionEmbed)(idxs::AbstractVector{<:Integer}) = @view pe.pe[:, idxs]
 
 
-function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, drop_middle_layer = false, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = leakyrelu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false, customCrossAttention = true, one_by_one_training = false, clip_range = 0.2f0, tanh_end = false, positional_encoding = 1, useSeparateValueChain = false, verbose = false)
+function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = leakyrelu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false, customCrossAttention = true, one_by_one_training = false, clip_range = 0.2f0, tanh_end = false, positional_encoding = 1, useSeparateValueChain = false, verbose = false)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
-    isnothing(drop_middle_layer_critic) &&  (drop_middle_layer_critic = drop_middle_layer)
+    !isnothing(drop_middle_layer)        &&  (network_depth = drop_middle_layer ? 1 : 2)
+    !isnothing(drop_middle_layer_critic) &&  (network_depth_critic = drop_middle_layer_critic ? 1 : 2)
+    isnothing(network_depth_critic)      &&  (network_depth_critic = network_depth)
+    network_depth = max(1, Int(network_depth))
+    network_depth_critic = max(1, Int(network_depth_critic))
     isnothing(fun_critic)               &&  (fun_critic = fun)
     isnothing(head_dim)                 &&  (head_dim = Int(floor(dim_model/head_num)))
 
@@ -436,20 +430,23 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     context_size = n_actors
 
     if jointPPO
-        if drop_middle_layer_critic
-            head_encoder = Dense(dim_model*n_actors, 1)
-        else
-            head_encoder = Chain(Dense(dim_model*n_actors, ffn_dim, fun),Dense(ffn_dim, 1))
-        end
+        encoder_input_dim = dim_model * n_actors
     else
-        if drop_middle_layer_critic
-            head_encoder = Dense(dim_model, 1)
-        else
-            head_encoder = Chain(Dense(dim_model, ffn_dim, fun),Dense(ffn_dim, 1))
-        end
+        encoder_input_dim = dim_model
     end
 
-    if drop_middle_layer
+    if network_depth_critic == 1
+        head_encoder = Dense(encoder_input_dim, 1)
+    else
+        encoder_layers = Any[Dense(encoder_input_dim, ffn_dim, fun)]
+        for _ in 3:network_depth_critic
+            push!(encoder_layers, Dense(ffn_dim, ffn_dim, fun))
+        end
+        push!(encoder_layers, Dense(ffn_dim, 1))
+        head_encoder = Chain(encoder_layers...)
+    end
+
+    if network_depth == 1
         if tanh_end
             head_decoder = Dense(dim_model, na, tanh)
         else
@@ -458,12 +455,16 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
         head_decoder.weight[:] *= 0.01
         head_decoder.bias[:] *= 0.01
     else
-        if tanh_end
-            head_decoder = Chain(Dense(dim_model, ffn_dim, fun),Dense(ffn_dim, na, tanh))
-        else
-            head_decoder = Chain(Dense(dim_model, ffn_dim, fun),Dense(ffn_dim, na))
+        decoder_layers = Any[Dense(dim_model, ffn_dim, fun)]
+        for _ in 3:network_depth
+            push!(decoder_layers, Dense(ffn_dim, ffn_dim, fun))
         end
-        
+        if tanh_end
+            push!(decoder_layers, Dense(ffn_dim, na, tanh))
+        else
+            push!(decoder_layers, Dense(ffn_dim, na))
+        end
+        head_decoder = Chain(decoder_layers...)
     end
 
 
@@ -526,7 +527,7 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
         dropout = Dropout(drop_out),
         blocks = decoder_blocks,
         head = head_decoder,
-        logσ = create_logσ_mat(logσ_is_network = logσ_is_network, ns = dim_model, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, drop_middle_layer = drop_middle_layer, fun = fun, start_logσ = start_logσ),
+        logσ = create_logσ_mat(logσ_is_network = logσ_is_network, ns = dim_model, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, network_depth = network_depth, fun = fun, start_logσ = start_logσ),
         logσ_is_network = logσ_is_network,
         max_σ = max_σ,
     )
