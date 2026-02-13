@@ -556,6 +556,28 @@ function update!(
     end
 end
 
+function update_IL(p::PPOPolicy2, trajectory::AbstractTrajectory)
+    n_total = length(trajectory)
+    n_total == 0 && return
+
+    window = min(p.update_freq, n_total)
+    start_idx = rand(p.rng, 1:(n_total - window + 1))
+    stop_idx = start_idx + window - 1
+
+    temp_trajectory = Trajectory(
+        state = trajectory[:state][:, :, start_idx:stop_idx],
+        action = trajectory[:action][:, :, start_idx:stop_idx],
+        action_log_prob = trajectory[:action_log_prob][:, start_idx:stop_idx],
+        reward = trajectory[:reward][:, start_idx:stop_idx],
+        explore_mod = trajectory[:explore_mod][:, start_idx:stop_idx],
+        terminated = trajectory[:terminated][:, start_idx:stop_idx],
+        truncated = trajectory[:truncated][:, start_idx:stop_idx],
+        next_state = trajectory[:next_state][:, :, start_idx:stop_idx],
+    )
+
+    _update!(p, temp_trajectory)
+end
+
 
 
 
@@ -717,7 +739,7 @@ end
 
 
 
-function _update!(p::PPOPolicy2, t::Any; IL=false)
+function _update!(p::PPOPolicy2, t::Any)
     rng = p.rng
     AC = p.approximator
     γ = p.γ
@@ -945,15 +967,12 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
 
 
 
-                if IL
-                    critic_loss = 0.0
-                    # critic2_loss = 0.0
-                else
-                    bellman = mean(((tar .- values_pred) .^ 2))
-                    fr_term = mean((values_pred .- v_ref[inds]) .^ 2)
-                    critic_loss = bellman + 0.4 * fr_term # .* exp_m[:])
-                    # critic2_loss = mean(((nv .- nv′) .^ 2)) # .* exp_m[:])
-                end
+
+                bellman = mean(((tar .- values_pred) .^ 2))
+                fr_term = mean((values_pred .- v_ref[inds]) .^ 2)
+                critic_loss = bellman + 0.4 * fr_term # .* exp_m[:])
+                # critic2_loss = mean(((nv .- nv′) .^ 2)) # .* exp_m[:])
+
 
                 loss = w₁ * actor_loss + w₂ * critic_loss - w₃ * entropy_loss #+ w₄ * critic_regularization #+ w₅ * logσ_regularization
 
@@ -1017,13 +1036,10 @@ function _update!(p::PPOPolicy2, t::Any; IL=false)
                     values_pred2 = old_v2 .+ clamp.(Δ, -clip_range_vf, clip_range_vf)
                 end
 
-                if IL
-                    critic2_loss = 0.0
-                else
-                    bellman = mean(((tar .- values_pred2) .^ 2))
-                    fr_term = mean((values_pred2 .- q_ref[inds]) .^ 2)
-                    critic2_loss = bellman + 0.4 * fr_term # .* exp_m[:]
-                end
+                
+                bellman = mean(((tar .- values_pred2) .^ 2))
+                fr_term = mean((values_pred2 .- q_ref[inds]) .^ 2)
+                critic2_loss = bellman + 0.4 * fr_term # .* exp_m[:]
 
                 ignore() do
                     push!(critic2_losses, w₂ * critic2_loss)

@@ -248,6 +248,8 @@ function _update!(p::SACPolicy, t::AbstractTrajectory)
     end
 end
 
+update_IL(p::SACPolicy, t::AbstractTrajectory) = _update!(p, t)
+
 
 
 function update!(p::SACPolicy, batch::NamedTuple{SARTTS})

@@ -332,6 +332,8 @@ function _update!(p::CustomDDPGPolicy, t::AbstractTrajectory)
     end
 end
 
+update_IL(p::CustomDDPGPolicy, t::AbstractTrajectory) = _update!(p, t)
+
 function update!(policy::CustomDDPGPolicy, batch::NamedTuple{SARTS})
     
     s, a, r, terminated, snext = batch
