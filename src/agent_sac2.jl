@@ -6,19 +6,14 @@ Base.@kwdef mutable struct SACPolicy2 <: AbstractPolicy
     target_qnetwork1
     target_qnetwork2
 
-    critic
-    critic_frozen
 
     optimizer_actor = ADAM()
     optimizer_qnetwork1 = ADAM()
     optimizer_qnetwork2 = ADAM()
-    optimizer_critic = ADAM()
     actor_state_tree = nothing
     qnetwork1_state_tree = nothing
     qnetwork2_state_tree = nothing
-    critic_state_tree = nothing
 
-    critic_frozen_factor
 
     action_space::Space
     state_space::Space
@@ -70,7 +65,7 @@ Base.@kwdef mutable struct SACPolicy2 <: AbstractPolicy
 end
 
 
-function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 7.0f0, min_σ = 2f-9, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false, critic_frozen_factor = 0.1f0, on_policy_update_freq = 2500, λ_targets= 0.7f0, fear_factor = 0.1f0, target_frac = 0.3f0, verbose = false, antithetic_mean_samples = 16, on_policy_n_batches = 64, on_policy_epochs = 3)
+function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 7.0f0, min_σ = 2f-9, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false, on_policy_update_freq = 2500, λ_targets= 0.7f0, fear_factor = 0.1f0, target_frac = 0.3f0, verbose = false, antithetic_mean_samples = 16, on_policy_n_batches = 64, on_policy_epochs = 3)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     !isnothing(drop_middle_layer)        &&  (network_depth = drop_middle_layer ? 1 : 2)
@@ -97,9 +92,6 @@ function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, 
     qnetwork2 = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, network_depth = network_depth_critic, fun = fun_critic, is_critic2 = true, popart = use_popart)
     target_qnetwork2 = deepcopy(qnetwork2)
 
-    critic = create_critic_PPO2(ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale_critic, network_depth = network_depth_critic, fun = fun_critic, popart = use_popart)
-
-    critic_frozen = deepcopy(critic)
 
     Agent(
         policy = SACPolicy2(
@@ -115,15 +107,10 @@ function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, 
             target_qnetwork1 = target_qnetwork1,
             target_qnetwork2 = target_qnetwork2,
 
-            critic = critic,
-            critic_frozen = critic_frozen,
 
             optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas, 1e-4, 1e-8;)),
             optimizer_qnetwork1 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate_critic, betas, 1e-4, 1e-8;)),
             optimizer_qnetwork2 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate_critic, betas, 1e-4, 1e-8;)),
-            optimizer_critic = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate_critic, betas, 1e-4, 1e-8;)),
-
-            critic_frozen_factor = critic_frozen_factor,
 
             action_space = action_space,
             state_space = state_space,
@@ -315,9 +302,6 @@ function check_state_trees(p::SACPolicy2)
         p.qnetwork1_state_tree = Flux.setup(p.optimizer_qnetwork1, p.qnetwork1)
         p.qnetwork2_state_tree = Flux.setup(p.optimizer_qnetwork2, p.qnetwork2)
 
-        p.critic_state_tree = Flux.setup(p.optimizer_critic, p.critic)
-
-        Optimisers.adjust!(p.critic_state_tree.layers[end]; lambda = 0.0)
         Optimisers.adjust!(p.qnetwork1_state_tree.layers[end]; lambda = 0.0)
         Optimisers.adjust!(p.qnetwork2_state_tree.layers[end]; lambda = 0.0)
 
