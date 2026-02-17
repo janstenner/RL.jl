@@ -597,7 +597,25 @@ function _update!(p::SACPolicy2, t::AbstractTrajectory)
     end
 end
 
-update_IL(p::SACPolicy2, t::AbstractTrajectory) = _update!(p, t)
+function update_IL(p::SACPolicy2, trajectory::AbstractTrajectory)
+    n_total = length(trajectory)
+    n_total == 0 && return
+
+    window = min(p.on_policy_update_freq, n_total)
+    start_idx = rand(p.rng, 1:(n_total - window + 1))
+    stop_idx = start_idx + window - 1
+
+    temp_trajectory = Trajectory(
+        state = trajectory[:state][:, :, start_idx:stop_idx],
+        action = trajectory[:action][:, :, start_idx:stop_idx],
+        reward = trajectory[:reward][:, start_idx:stop_idx],
+        terminated = trajectory[:terminated][:, start_idx:stop_idx],
+        truncated = trajectory[:truncated][:, start_idx:stop_idx],
+        next_state = trajectory[:next_state][:, :, start_idx:stop_idx],
+    )
+
+    on_policy_update(p, temp_trajectory; whole_trajectory = true)
+end
 
 
 
