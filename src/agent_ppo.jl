@@ -66,7 +66,7 @@ function create_logσ(;logσ_is_network, ns, na, use_gpu, init, nna_scale, netwo
     return res
 end
 
-function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, noise = nothing, noise_scale = 90, clip_range_vf = nothing, verbose = false)
+function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, noise = nothing, noise_scale = 90, clip_range_vf = nothing, dist = Normal, verbose = false)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     !isnothing(drop_middle_layer)        &&  (network_depth = drop_middle_layer ? 1 : 2)
@@ -88,15 +88,29 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
         noise_sampler = nothing
     end
 
+    default_actor = if dist == Normal
+        GaussianNetwork(
+            μ = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, network_depth = network_depth, fun = fun, tanh_end = tanh_end),
+            logσ = create_logσ(logσ_is_network = logσ_is_network, ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, network_depth = network_depth, fun = fun, start_logσ = start_logσ),
+            logσ_is_network = logσ_is_network,
+            max_σ = max_σ
+        )
+    elseif dist == Categorical
+        # For discrete policies, the actor must output logits (no tanh).
+        create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, network_depth = network_depth, fun = fun, tanh_end = false)
+    else
+        error("Unsupported distribution type $(dist). Use Normal or Categorical.")
+    end
+
+    action_schema =
+        dist == Categorical ?
+        (Int => (n_envs,)) :
+        (Float32 => (size(action_space)[1], n_envs))
+
     Agent(
         policy = PPOPolicy(
             approximator = isnothing(approximator) ? ActorCritic(
-                actor = GaussianNetwork(
-                    μ = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, network_depth = network_depth, fun = fun, tanh_end = tanh_end),
-                    logσ = create_logσ(logσ_is_network = logσ_is_network, ns = ns, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, network_depth = network_depth, fun = fun, start_logσ = start_logσ),
-                    logσ_is_network = logσ_is_network,
-                    max_σ = max_σ
-                ),
+                actor = default_actor,
                 critic = create_chain(ns = ns, na = na, use_gpu = use_gpu, is_actor = false, init = init, nna_scale = nna_scale_critic, network_depth = network_depth_critic, fun = fun_critic),
                 optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas)),
                 optimizer_critic = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate_critic, betas)),
@@ -111,7 +125,7 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
             actor_loss_weight = actor_loss_weight,
             critic_loss_weight = critic_loss_weight,
             entropy_loss_weight = entropy_loss_weight,
-            dist = Normal,
+            dist = dist,
             rng = rng,
             update_freq = update_freq,
             clip1 = clip1,
@@ -128,7 +142,7 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
         CircularArrayTrajectory(;
                 capacity = update_freq,
                 state = Float32 => (size(state_space)[1], n_envs),
-                action = Float32 => (size(action_space)[1], n_envs),
+                action = action_schema,
                 action_log_prob = Float32 => (n_envs),
                 reward = Float32 => (n_envs),
                 terminated = Bool => (n_envs,),
@@ -250,8 +264,12 @@ end
 
 function prob(p::PPOPolicy{<:ActorCritic,Categorical}, state::AbstractArray, mask)
     logits = p.approximator.actor(send_to_device(device(p.approximator), state))
+    if ndims(logits) == 1
+        logits = reshape(logits, :, 1)
+    end
     if !isnothing(mask)
-        logits .+= ifelse.(mask, 0.0f0, typemin(Float32))
+        mask_local = ndims(mask) == 1 ? reshape(mask, :, 1) : mask
+        logits .+= ifelse.(mask_local, 0.0f0, typemin(Float32))
     end
     logits = logits |> softmax |> send_to_host
     if p.update_step < p.n_random_start
@@ -278,7 +296,7 @@ end
 
 function (p::PPOPolicy)(env::MultiThreadEnv)
     result = rand.(p.rng, prob(p, env))
-    if p.clip1
+    if p.clip1 && !(eltype(result) <: Integer)
         clamp!(result, -1.0, 1.0)
     end
     result
@@ -291,52 +309,70 @@ function (p::PPOPolicy)(env::AbstractEnv)
     if p.update_step <= p.start_steps
         p.start_policy(env)
     else
-        dist = prob(p, env)
-
-        if isnothing(p.noise)
-            action = rand.(p.rng, dist)
+        if p isa PPOPolicy{<:ActorCritic,Categorical}
+            action_dist = prob(p, env)
+            if length(action_dist) == 1
+                action = rand(p.rng, action_dist[1])
+                log_p = [Float32(logpdf(action_dist[1], action))]
+            else
+                action = rand.(p.rng, action_dist)
+                log_p = Float32.(vec(logpdf.(action_dist, action)))
+            end
+            p.last_action_log_prob = log_p
+            p.last_mu = [0.0f0]
+            p.last_sigma = [0.0f0]
+            action
         else
-            norm_factor = float(pi / 20) #* 5
-            p.noise_step += 1
-            noise = [CoherentNoise.sample(p.noise_sampler, p.noise_step/p.noise_scale, float(π+2*i))/norm_factor for i in 1:size(dist.μ, 2)]
-            action = dist.μ + dist.σ .* noise'
+            dist = prob(p, env)
+
+            if isnothing(p.noise)
+                action = rand.(p.rng, dist)
+            else
+                norm_factor = float(pi / 20) #* 5
+                p.noise_step += 1
+                noise = [CoherentNoise.sample(p.noise_sampler, p.noise_step/p.noise_scale, float(π+2*i))/norm_factor for i in 1:size(dist.μ, 2)]
+                action = dist.μ + dist.σ .* noise'
+            end
+
+            if p.clip1
+                clamp!(action, -1.0, 1.0)
+            end
+
+            # put the last action log prob behind the clip
+            
+            ###p.last_action_log_prob = vec(sum(logpdf.(dist, action), dims=1))
+
+            if ndims(action) == 2
+                log_p = vec(sum(normlogpdf(dist.μ, dist.σ, action), dims=1))
+            else
+                log_p = normlogpdf(dist.μ, dist.σ, action)
+            end
+
+            p.last_action_log_prob = log_p
+            p.last_mu = dist.μ[:]
+            p.last_sigma = dist.σ[:]
+
+            action
         end
-
-        if p.clip1
-            clamp!(action, -1.0, 1.0)
-        end
-
-        # put the last action log prob behind the clip
-        
-        ###p.last_action_log_prob = vec(sum(logpdf.(dist, action), dims=1))
-
-        if ndims(action) == 2
-            log_p = vec(sum(normlogpdf(dist.μ, dist.σ, action), dims=1))
-        else
-            log_p = normlogpdf(dist.μ, dist.σ, action)
-        end
-
-        p.last_action_log_prob = log_p
-        p.last_mu = dist.μ[:]
-        p.last_sigma = dist.σ[:]
-
-        action
     end
 end
 
 function (agent::Agent{<:PPOPolicy})(env::MultiThreadEnv)
 
-    if agent.policy.update_step <= policy.start_steps
+    if agent.policy.update_step <= agent.policy.start_steps
         agent.policy.start_policy(env)
     else
         dist = prob(agent.policy, env)
         action = rand.(agent.policy.rng, dist)
-        if ndims(action) == 2
-            action_log_prob = sum(logpdf.(dist, action), dims=1)
-        else
-            action_log_prob = sum(logpdf.(dist, action), dims=1)
+        if agent.policy.clip1 && !(eltype(action) <: Integer)
+            clamp!(action, -1.0, 1.0)
         end
-        EnrichedAction(action; action_log_prob=vec(action_log_prob))
+        logpdf_values = logpdf.(dist, action)
+        action_log_prob =
+            ndims(logpdf_values) == 2 ?
+            vec(sum(logpdf_values, dims=1)) :
+            vec(logpdf_values)
+        EnrichedAction(action; action_log_prob=action_log_prob)
     end
 end
 
@@ -368,10 +404,14 @@ function update!(
     ::PreActStage,
     action,
 )
+    action_store =
+        policy isa PPOPolicy{<:ActorCritic,Categorical} && action isa Integer ?
+        Int[action] :
+        action
     push!(
         trajectory;
         state=state(env),
-        action=action,
+        action=action_store,
         action_log_prob=policy.last_action_log_prob
     )
 end
@@ -412,9 +452,17 @@ function update_IL(p::PPOPolicy, trajectory::AbstractTrajectory)
     start_idx = rand(p.rng, 1:(n_total - window + 1))
     stop_idx = start_idx + window - 1
 
+    action_full = trajectory[:action]
+    action_window =
+        ndims(action_full) == 3 ?
+        action_full[:, :, start_idx:stop_idx] :
+        ndims(action_full) == 2 ?
+        action_full[:, start_idx:stop_idx] :
+        action_full[start_idx:stop_idx]
+
     temp_trajectory = Trajectory(
         state = trajectory[:state][:, :, start_idx:stop_idx],
-        action = trajectory[:action][:, :, start_idx:stop_idx],
+        action = action_window,
         action_log_prob = trajectory[:action_log_prob][:, start_idx:stop_idx],
         reward = trajectory[:reward][:, start_idx:stop_idx],
         terminated = trajectory[:terminated][:, start_idx:stop_idx],
@@ -498,11 +546,9 @@ function _update!(p::PPOPolicy, t::Any)
             # s = to_device(select_last_dim(states_flatten_on_host, inds))
             # !!! we need to convert it into a continuous CuArray otherwise CUDA.jl will complain scalar indexing
             s = to_device(collect(select_last_dim(states_flatten_on_host, inds)))
-            a = to_device(collect(select_last_dim(actions_flatten, inds)))
-
-            if eltype(a) === Int
-                a = CartesianIndex.(a, 1:length(a))
-            end
+            a_host = collect(select_last_dim(actions_flatten, inds))
+            a = to_device(a_host)
+            a_discrete = eltype(a_host) <: Integer ? Int.(vec(a_host)) : nothing
 
             r = vec(returns)[inds]
             log_p = vec(action_log_probs)[inds]
@@ -539,11 +585,19 @@ function _update!(p::PPOPolicy, t::Any)
                 else
                     # actor is assumed to return discrete logits
                     logit′ = actor(s)
+                    if ndims(logit′) == 1
+                        logit′ = reshape(logit′, :, 1)
+                    end
 
                     p′ = softmax(logit′)
                     log_p′ = logsoftmax(logit′)
-                    log_p′ₐ = log_p′[a]
-                    entropy_loss = -sum(p′ .* log_p′) * 1 // size(p′, 2)
+                    if isnothing(a_discrete)
+                        error("Categorical PPO expects integer actions in trajectory.")
+                    end
+                    n_actions = size(log_p′, 1)
+                    one_hot_actions = to_device(Float32.(Flux.onehotbatch(a_discrete, 1:n_actions)))
+                    log_p′ₐ = vec(sum(log_p′ .* one_hot_actions; dims=1))
+                    entropy_loss = -mean(sum(p′ .* log_p′; dims=1))
                 end
                 ratio = exp.(log_p′ₐ .- log_p)
 
