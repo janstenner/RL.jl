@@ -167,16 +167,16 @@ function reset!(env::GeneralEnv)
     nothing
 end
 
-function (env::GeneralEnv)(action; reward_shaping = true)
+function (env::GeneralEnv)(action; reward_shaping = nothing)
     env.delta_action = action - env.action
     env.action = action
     
     env.p = env.prepare_action(; env = env)
 
-    if reward_shaping
+    if isnothing(reward_shaping)
         env.y = env.do_step(env)
     else
-        env.y = env.do_step(env; reward_shaping = false)
+        env.y = env.do_step(env; reward_shaping = reward_shaping)
     end
 
     # Legacy code - use this inside of do_step in script if needed
