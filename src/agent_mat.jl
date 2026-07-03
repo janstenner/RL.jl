@@ -410,7 +410,7 @@ end
 (pe::SinCosPositionEmbed)(idxs::AbstractVector{<:Integer}) = @view pe.pe[:, idxs]
 
 
-function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = leakyrelu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false, customCrossAttention = true, one_by_one_training = false, clip_range = 0.2f0, tanh_end = false, positional_encoding = 1, positional_encoding_decoder = nothing, useSeparateValueChain = false, verbose = false)
+function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, learning_rate = 0.00001, fun = leakyrelu, fun_critic = nothing, n_actors = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, adaptive_weights = false, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, dim_model = 64, block_num = 1, head_num = 4, head_dim = nothing, ffn_dim = 120, drop_out = 0.1, betas = (0.99, 0.99), jointPPO = false, customCrossAttention = true, one_by_one_training = false, clip_range = 0.2f0, tanh_end = false, positional_encoding = 1, positional_encoding_decoder = nothing, useSeparateValueChain = false, verbose = false, use_mus = true)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     !isnothing(drop_middle_layer)        &&  (network_depth = drop_middle_layer ? 1 : 2)
@@ -581,6 +581,7 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
             jointPPO = jointPPO,
             one_by_one_training = one_by_one_training,
             verbose = verbose,
+            use_mus = use_mus,
         ),
         trajectory = 
         CircularArrayTrajectory(;
@@ -625,6 +626,7 @@ Base.@kwdef mutable struct MATPolicy <: AbstractPolicy
     start_policy = nothing
     target_kl = 100.0
     verbose::Bool = false
+    use_mus::Bool = true
     last_action_log_prob::Vector{Float32} = [0.0]
     next_values::Vector{Float32} = [0.0]
     jointPPO::Bool = false
@@ -678,31 +680,68 @@ end
 
 function (p::MATPolicy)(env::AbstractEnv)
 
-    if p.update_step <= p.start_steps
-        dist = prob(p, env)
-        action = p.start_policy(env)
+    if p.use_mus
+
+        if p.update_step <= p.start_steps
+            dist = prob(p, env)
+            action = p.start_policy(env)
+        else
+            dist = prob(p, env)
+            action = rand.(p.rng, dist)
+        end
+
+        if p.clip1
+            clamp!(action, -1.0, 1.0)
+        end
+
+        # put the last action log prob behind the clip
+        
+        ###p.last_action_log_prob = vec(sum(logpdf.(dist, action), dims=1))
+
+
+        if ndims(action) > 1
+            log_p = vec(sum(normlogpdf(dist.μ, dist.σ, action), dims=1))
+        else
+            log_p = normlogpdf(dist.μ, dist.σ, action)
+        end
+
+        p.last_action_log_prob = log_p[:]
+
+        return action
+
     else
-        dist = prob(p, env)
+
+        state = env.state
+        na = size(p.decoder.embedding.weight)[2]
+        batch_size = length(size(state)) == 3 ? size(state)[3] : 1
+
+        obsrep, val = p.encoder(state)
+
+        μ, logσ = p.decoder(zeros(Float32,na,1,batch_size), obsrep[:,1:1,:])
+        dist = StructArray{Normal}((μ, exp.(logσ)))
         action = rand.(p.rng, dist)
+        if p.clip1
+            clamp!(action, -1.0, 1.0)
+        end
+
+        for n in 2:p.n_actors
+            μ, logσ = p.decoder(cat(zeros(Float32,na,1,batch_size), action, dims=2), obsrep[:,1:n,:])
+            
+            dist = StructArray{Normal}((μ, exp.(logσ)))
+            new_action = rand.(p.rng, dist)[:,end:end,:]
+            if p.clip1
+                clamp!(new_action, -1.0, 1.0)
+            end
+
+            action = cat(action, new_action, dims=2)
+        end
+
+        log_p = sum(normlogpdf(dist.μ, dist.σ, action), dims=1)
+
+        p.last_action_log_prob = log_p[:]
+
+        return action
     end
-
-    if p.clip1
-        clamp!(action, -1.0, 1.0)
-    end
-
-    # put the last action log prob behind the clip
-    
-    ###p.last_action_log_prob = vec(sum(logpdf.(dist, action), dims=1))
-
-    if ndims(action) == 2
-        log_p = vec(sum(normlogpdf(dist.μ, dist.σ, action), dims=1))
-    else
-        log_p = normlogpdf(dist.μ, dist.σ, action)
-    end
-
-    p.last_action_log_prob = log_p[:]
-
-    action
 end
 
 function (agent::Agent{<:MATPolicy})(env::MultiThreadEnv)
@@ -928,20 +967,23 @@ function _update!(p::MATPolicy, t::Any)
                 # obs_rep, v′_no = p.encoder(s)
                 # obs_rep_no, v′ = encoder(s)
 
-                # parallel act
-                # temp_act = cat(zeros(Float32,1,1,size(a)[3]),a[:,1:end-1,:],dims=2)
-                # μ, logσ = decoder(temp_act, obs_rep)
+                if p.use_mus
+                    # auto regressive act
+                    μ, logσ = decoder(zeros(Float32,size(a,1),1,microbatch_size), obs_rep[:,1:1,:])
 
-                # auto regressive act
-                μ, logσ = decoder(zeros(Float32,size(a,1),1,microbatch_size), obs_rep[:,1:1,:])
+                    for n in 2:p.n_actors
+                        newμ, newlogσ = decoder(cat(zeros(Float32,size(a,1),1,microbatch_size), μ, dims=2), obs_rep[:,1:n,:])
 
-                for n in 2:p.n_actors
-                    newμ, newlogσ = decoder(cat(zeros(Float32,size(a,1),1,microbatch_size), μ, dims=2), obs_rep[:,1:n,:])
-
-                    μ = cat(μ, newμ[:,end:end,:], dims=2)
-                    logσ = cat(logσ, newlogσ[:,end:end,:], dims=2)
-                end
+                        μ = cat(μ, newμ[:,end:end,:], dims=2)
+                        logσ = cat(logσ, newlogσ[:,end:end,:], dims=2)
+                    end
                 
+                else
+                    # parallel act
+                    temp_act = cat(zeros(Float32,1,1,size(a)[3]),a[:,1:end-1,:],dims=2)
+                    μ, logσ = decoder(temp_act, obs_rep)
+                end
+
                 log_p′ₐ = sum(normlogpdf(μ, exp.(logσ), a), dims=1)
 
                 
