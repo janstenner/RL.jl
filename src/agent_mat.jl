@@ -9,12 +9,17 @@ struct MATEncoderBlock{MHA,LN1,LN2,FF,DO}
 end
 
 function MATEncoderBlock(d_model::Int, nheads::Int, head_dim::Int, d_ff::Int;
-                         pdrop=0.0, useLayerNorm::Bool=false)
+                         pdrop=0.0,
+                         useLayerNorm::Bool=false,
+                         init=Flux.glorot_uniform)
     MATEncoderBlock(
-        MultiHeadAttention(d_model => head_dim*nheads => d_model, nheads=nheads, dropout_prob=pdrop),
+        MultiHeadAttention(d_model => head_dim*nheads => d_model, nheads=nheads, dropout_prob=pdrop, init=init),
         LayerNorm(d_model),
         LayerNorm(d_model),
-        Chain(Dense(d_model, d_ff, gelu), Dense(d_ff, d_model)),
+        Chain(
+            Dense(d_model, d_ff, gelu; init=init),
+            Dense(d_ff, d_model; init=init),
+        ),
         Dropout(pdrop),
         useLayerNorm,
     )
@@ -55,14 +60,18 @@ function MATDecoderBlock(d_model::Int, nheads::Int, head_dim::Int, d_ff::Int;
                          pdrop=0.0,
                          useCustomCrossAttention::Bool=true,
                          useLayerNorm::Bool=false,
-                         useSelfAttentionFirst::Bool=false)
+                         useSelfAttentionFirst::Bool=false,
+                         init=Flux.glorot_uniform)
     MATDecoderBlock(
-        MultiHeadAttention(d_model => head_dim*nheads => d_model, nheads=nheads, dropout_prob=pdrop),
-        MultiHeadAttention(d_model => head_dim*nheads => d_model, nheads=nheads, dropout_prob=pdrop),
+        MultiHeadAttention(d_model => head_dim*nheads => d_model, nheads=nheads, dropout_prob=pdrop, init=init),
+        MultiHeadAttention(d_model => head_dim*nheads => d_model, nheads=nheads, dropout_prob=pdrop, init=init),
         LayerNorm(d_model),
         LayerNorm(d_model),
         LayerNorm(d_model),
-        Chain(Dense(d_model, d_ff, gelu), Dense(d_ff, d_model)),
+        Chain(
+            Dense(d_model, d_ff, gelu; init=init),
+            Dense(d_ff, d_model; init=init),
+        ),
         Dropout(pdrop),
         useCustomCrossAttention,
         useLayerNorm,
@@ -124,12 +133,14 @@ function BlockStack(N::Integer, d_model::Int, nheads::Int, head_dim::Int, d_ff::
                     pdrop=0.0,
                     useCustomCrossAttention::Bool=true,
                     useLayerNorm::Bool=false,
-                    useSelfAttentionFirst::Bool=false)
+                    useSelfAttentionFirst::Bool=false,
+                    init=Flux.glorot_uniform)
     blocks = ntuple(_ -> MATDecoderBlock(d_model, nheads, head_dim, d_ff;
                                          pdrop=pdrop,
                                          useCustomCrossAttention=useCustomCrossAttention,
                                          useLayerNorm=useLayerNorm,
-                                         useSelfAttentionFirst=useSelfAttentionFirst),
+                                         useSelfAttentionFirst=useSelfAttentionFirst,
+                                         init=init),
                     Int(N))
     return BlockStack(blocks)
 end
@@ -453,33 +464,33 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     end
 
     if network_depth_critic == 1
-        head_encoder = Dense(encoder_input_dim, 1)
+        head_encoder = Dense(encoder_input_dim, 1; init=init)
     else
-        encoder_layers = Any[Dense(encoder_input_dim, ffn_dim, fun)]
+        encoder_layers = Any[Dense(encoder_input_dim, ffn_dim, fun; init=init)]
         for _ in 3:network_depth_critic
-            push!(encoder_layers, Dense(ffn_dim, ffn_dim, fun))
+            push!(encoder_layers, Dense(ffn_dim, ffn_dim, fun; init=init))
         end
-        push!(encoder_layers, Dense(ffn_dim, 1))
+        push!(encoder_layers, Dense(ffn_dim, 1; init=init))
         head_encoder = Chain(encoder_layers...)
     end
 
     if network_depth == 1
         if tanh_end
-            head_decoder = Dense(dim_model, na, tanh)
+            head_decoder = Dense(dim_model, na, tanh; init=init)
         else
-            head_decoder = Dense(dim_model, na)
+            head_decoder = Dense(dim_model, na; init=init)
         end
         head_decoder.weight[:] *= 0.01
         head_decoder.bias[:] *= 0.01
     else
-        decoder_layers = Any[Dense(dim_model, ffn_dim, fun)]
+        decoder_layers = Any[Dense(dim_model, ffn_dim, fun; init=init)]
         for _ in 3:network_depth
-            push!(decoder_layers, Dense(ffn_dim, ffn_dim, fun))
+            push!(decoder_layers, Dense(ffn_dim, ffn_dim, fun; init=init))
         end
         if tanh_end
-            push!(decoder_layers, Dense(ffn_dim, na, tanh))
+            push!(decoder_layers, Dense(ffn_dim, na, tanh; init=init))
         else
-            push!(decoder_layers, Dense(ffn_dim, na))
+            push!(decoder_layers, Dense(ffn_dim, na; init=init))
         end
         head_decoder = Chain(decoder_layers...)
     end
@@ -495,6 +506,7 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
         useCustomCrossAttention=customCrossAttention,
         useLayerNorm=useLayerNorm,
         useSelfAttentionFirst=useSelfAttentionFirst,
+        init=init,
     )
 
     encoder_blocks = Chain(ntuple(
@@ -505,6 +517,7 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
             ffn_dim;
             pdrop=drop_out,
             useLayerNorm=useLayerNorm,
+            init=init,
         ),
         block_num,
     )...)
@@ -512,7 +525,7 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     if positional_encoding == 1
         position_encoding_encoder = SinCosPositionEmbed(dim_model)
     elseif positional_encoding == 2
-        position_encoding_encoder = Embedding(context_size => dim_model)
+        position_encoding_encoder = Embedding(context_size => dim_model; init=init)
     elseif positional_encoding == 3
         position_encoding_encoder = ZeroEncoding(dim_model)
     end
@@ -520,29 +533,26 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     if positional_encoding_decoder == 1
         position_encoding_decoder = SinCosPositionEmbed(dim_model)
     elseif positional_encoding_decoder == 2
-        position_encoding_decoder = Embedding(context_size => dim_model)
+        position_encoding_decoder = Embedding(context_size => dim_model; init=init)
     elseif positional_encoding_decoder == 3
         position_encoding_decoder = ZeroEncoding(dim_model)
     end
 
+    embedding_encoder = Dense(ns, dim_model; bias=false, init=init)
+    layer_norm_encoder = LayerNorm(dim_model)
+    dropout_encoder = Dropout(drop_out)
+
+    embedding_decoder = Dense(na, dim_model; bias=false, init=init)
+    layer_norm_decoder = LayerNorm(dim_model)
+    dropout_decoder = Dropout(drop_out)
 
 
     if useSeparateValueChain
-        embedding_v = Dense(ns, dim_model, bias = false)
+        embedding_v = deepcopy(embedding_encoder)
         position_encoding_v = deepcopy(position_encoding_encoder)
-        ln_v = LayerNorm(dim_model)
-        dropout_v = Dropout(drop_out)
-        encoder_blocks_v = Chain(ntuple(
-            _ -> MATEncoderBlock(
-                dim_model,
-                head_num,
-                head_dim,
-                ffn_dim;
-                pdrop=drop_out,
-                useLayerNorm=useLayerNorm,
-            ),
-            block_num,
-        )...)
+        ln_v = deepcopy(layer_norm_encoder)
+        dropout_v = deepcopy(dropout_encoder)
+        encoder_blocks_v = deepcopy(encoder_blocks)
     else
         embedding_v = nothing
         position_encoding_v = nothing
@@ -554,10 +564,10 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     
 
     encoder = MATEncoder(
-        embedding = Dense(ns, dim_model, bias = false),
+        embedding = embedding_encoder,
         position_encoding = position_encoding_encoder,
-        ln = LayerNorm(dim_model),
-        dropout = Dropout(drop_out),
+        ln = layer_norm_encoder,
+        dropout = dropout_encoder,
         blocks = encoder_blocks,
 
         embedding_v = embedding_v,
@@ -574,10 +584,10 @@ function create_agent_mat(;action_space, state_space, use_gpu, rng, y, p, update
     )
 
     decoder = MATDecoder(
-        embedding = Dense(na, dim_model, bias = false),
+        embedding = embedding_decoder,
         position_encoding = position_encoding_decoder,
-        ln = LayerNorm(dim_model),
-        dropout = Dropout(drop_out),
+        ln = layer_norm_decoder,
+        dropout = dropout_decoder,
         blocks = decoder_blocks,
         head = head_decoder,
         logσ = create_logσ_mat(logσ_is_network = logσ_is_network, ns = dim_model, na = na, use_gpu = use_gpu, init = init, nna_scale = nna_scale, network_depth = network_depth, fun = fun, start_logσ = start_logσ),
