@@ -1054,7 +1054,7 @@ function _update!(p::MATPolicy, t::Any)
                 ignore() do
                     approx_kl_div = mean((ratio .- 1) - log.(ratio)) |> send_to_host
 
-                    if approx_kl_div > p.target_kl && (i > 1 || epoch > 1) # only in second batch
+                    if approx_kl_div > p.target_kl
                         if p.verbose
                             println("Target KL overstepped: $(approx_kl_div) at epoch $(epoch), batch $(i)")
                         end
