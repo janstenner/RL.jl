@@ -3,7 +3,7 @@
 # methods so that the existing SAC, trajectory and run implementations stay intact.
 export SACLSTMPolicy, create_agent_sac_lstm, reset_sac_lstm!, observe_sac_lstm!,
        act_sac_lstm!, sample_sac_lstm, sac_lstm_history, sac_lstm_actions,
-       sac_lstm_qvalues
+       sac_lstm_qvalues, sac_lstm_episode_starts
 
 struct SACLSTMEncoder{O,A,R,L}
     observ_embedder::O
@@ -109,6 +109,7 @@ Base.@kwdef mutable struct SACLSTMPolicy <: AbstractPolicy
     log_α_state_tree = nothing
     batch_size::Int = 32
     sequence_length::Int = 64
+    episode_starts_only::Bool = false
     start_steps::Int = -1
     start_policy = nothing
     update_after::Int = 1000
@@ -158,7 +159,10 @@ optimizers, entropy tuning and update scheduling are preserved. New defaults:
 and LSTM widths equal to the corresponding original MLP hidden widths.
 
 `batch_size` counts sequences. Each sampled sequence starts with zero memory
-and zero previous action/reward. Terminal and truncated transitions both end
+and zero previous action/reward. With `episode_starts_only=true`, sequences
+start only at stored episode beginnings (as pomdp-baselines with
+`sampled_seq_len = -1` when `sequence_length` covers a whole episode), so the
+zero initial memory matches inference. Terminal and truncated transitions both end
 sequences; only terminated transitions suppress bootstrapping. `update_IL`
 runs the same SAC updates on ordered external SARTTS trajectories.
 """
@@ -173,7 +177,8 @@ function create_agent_sac_lstm(; action_space, state_space, use_gpu=false, rng, 
     trajectory_length=10_000, automatic_entropy_tuning=true, lr_alpha=nothing,
     target_entropy=nothing, use_popart=false, verbose=false,
     observ_embedding_size=32, action_embedding_size=16, reward_embedding_size=16,
-    rnn_hidden_size=nothing, rnn_hidden_size_critic=nothing, sequence_length=64)
+    rnn_hidden_size=nothing, rnn_hidden_size_critic=nothing, sequence_length=64,
+    episode_starts_only=false)
 
     isnothing(nna_scale_critic) && (nna_scale_critic = nna_scale)
     !isnothing(drop_middle_layer) && (network_depth = drop_middle_layer ? 1 : 2)
@@ -223,7 +228,7 @@ function create_agent_sac_lstm(; action_space, state_space, use_gpu=false, rng, 
         optimizer_critic=Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate_critic, betas)),
         action_space, state_space, γ=Float32(y), τ=Float32(t), α=Float32(a),
         log_α=Float32[log(a)], optimizer_log_α=Optimisers.Adam(lr_alpha),
-        batch_size, sequence_length, start_steps, start_policy, update_after,
+        batch_size, sequence_length, episode_starts_only, start_steps, start_policy, update_after,
         update_freq, update_loops, automatic_entropy_tuning, lr_alpha=Float32(lr_alpha),
         target_entropy=Float32(target_entropy), rng, use_popart, verbose)
     reset_sac_lstm!(policy; batch_size=n_agents)
@@ -318,9 +323,35 @@ update_IL(p::SACLSTMPolicy, t::AbstractTrajectory) = _update!(p, t)
 _sac_lstm_frame(x, lane, index) = ndims(x) == 3 ? view(x, :, lane, index) : view(x, :, index)
 _sac_lstm_scalar(x, lane, index) = ndims(x) == 1 ? x[index] : x[lane, index]
 
+_sac_lstm_flags(x, n_lanes, n) = reshape(collect(x) .!= 0, n_lanes, n)
+
+"""
+    sac_lstm_episode_starts(t)
+
+All stored `(index, lane)` pairs at which an episode begins: a set
+`episode_start` flag, or the transition after a terminated/truncated one.
+Without an `episode_start` field (external SARTTS data) index 1 also counts.
+With the flag, an unflagged index 1 is a wrapped-around episode remainder and
+is excluded.
+"""
+function sac_lstm_episode_starts(t::AbstractTrajectory)
+    n = length(t)
+    n_lanes = ndims(t[:state]) == 3 ? size(t[:state], 2) : 1
+    has_flag = haskey(t, :episode_start)
+    begins = has_flag ? _sac_lstm_flags(t[:episode_start], n_lanes, n) : falses(n_lanes, n)
+    has_flag || (begins[:, 1] .= true)
+    if n > 1
+        ended = _sac_lstm_flags(t[:terminated], n_lanes, n) .|
+                _sac_lstm_flags(t[:truncated], n_lanes, n)
+        begins[:, 2:end] .|= ended[:, 1:end-1]
+    end
+    return [(c[2], c[1]) for c in findall(begins)]
+end
+
 """
 Sample ordered windows, right-padded with zeros and a loss mask. Starts are
-uniform over stored transitions (including short episode suffixes). A window
+uniform over stored transitions (including short episode suffixes), or, with
+`p.episode_starts_only`, uniform over stored episode beginnings. A window
 never crosses termination, truncation, an explicit reset, or the buffer end.
 External SAC trajectories need only the original six SARTTS fields; their
 terminated/truncated flags must mark episode boundaries. Optional `starts`
@@ -335,6 +366,12 @@ function sample_sac_lstm(p::SACLSTMPolicy, t::AbstractTrajectory; starts=nothing
     size(t[:state], 1) == ns && size(t[:next_state], 1) == ns && size(t[:action], 1) == na ||
         throw(DimensionMismatch("trajectory and policy dimensions differ"))
     n_lanes = ndims(t[:state]) == 3 ? size(t[:state], 2) : 1
+    if isnothing(starts) && p.episode_starts_only
+        candidates = sac_lstm_episode_starts(t)
+        isempty(candidates) && throw(ArgumentError("trajectory contains no episode start"))
+        picks = rand(p.rng, candidates, p.batch_size)
+        starts, lanes = first.(picks), last.(picks)
+    end
     starts = isnothing(starts) ? rand(p.rng, 1:n, p.batch_size) : starts
     b = length(starts)
     b > 0 || throw(ArgumentError("empty batch"))
