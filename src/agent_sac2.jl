@@ -421,6 +421,8 @@ function on_policy_update(p::SACPolicy2, traj::AbstractTrajectory; whole_traject
         target_frac = p.target_frac
         τ_change = 3f-4
         μ_before, logσ_before = p.actor(p.device_rng, s)
+        # hotfix: a global logσ comes back as (na, n_agents) for 3D input; expand to μ's shape for per-sample indexing
+        logσ_before = logσ_before .+ zero(μ_before)
         μ_before_flatten_on_host = flatten_batch(send_to_host(μ_before))
         logσ_before_flatten_on_host = flatten_batch(send_to_host(logσ_before))
     end
