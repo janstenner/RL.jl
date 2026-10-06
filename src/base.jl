@@ -4,6 +4,19 @@ end
 
 (p::ZeroPolicy)(env) = zeros(size(p.action_space))
 
+# Uniform random actions in [low, high], e.g. as warm-up `start_policy`.
+struct UniformRandomPolicy{R} <: AbstractPolicy
+    action_space
+    rng::R
+    low::Float32
+    high::Float32
+end
+
+UniformRandomPolicy(action_space; rng = Random.default_rng(), low = -1, high = 1) =
+    UniformRandomPolicy(action_space, rng, Float32(low), Float32(high))
+
+(p::UniformRandomPolicy)(env) = p.low .+ (p.high - p.low) .* rand(p.rng, Float32, size(p.action_space))
+
 
 #####
 # Spaces

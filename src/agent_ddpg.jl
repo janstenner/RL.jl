@@ -1,4 +1,4 @@
-function create_NNA(;na, ns, use_gpu, is_actor, init, copyfrom = nothing, nna_scale, network_depth = 2, drop_middle_layer = nothing, learning_rate = 0.001, fun = relu)
+function create_NNA(;na, ns, use_gpu, is_actor, init, final_init = nothing, copyfrom = nothing, nna_scale, network_depth = 2, drop_middle_layer = nothing, learning_rate = 0.001, fun = relu)
     if !isnothing(drop_middle_layer)
         network_depth = drop_middle_layer ? 1 : 2
     end
@@ -12,7 +12,7 @@ function create_NNA(;na, ns, use_gpu, is_actor, init, copyfrom = nothing, nna_sc
         for _ in 2:network_depth
             push!(layers, Dense(nna_size_actor, nna_size_actor, fun; init = init))
         end
-        push!(layers, Dense(nna_size_actor, na, tanh; init = init))
+        push!(layers, Dense(nna_size_actor, na, tanh; init = isnothing(final_init) ? init : final_init))
         n = Chain(layers...)
     else
         layers = Any[Dense(ns + na, nna_size_critic, fun; init = init)]
@@ -41,7 +41,7 @@ end
 function create_agent(;action_space, state_space, use_gpu, rng, y, p, batch_size,
                     start_steps, start_policy, update_after, update_freq, update_loops = 1, reset_stage = POST_EPISODE_STAGE, act_limit,
                     act_noise, noise_hold = 1,
-                    nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, memory_size = 0, trajectory_length = 1000, mono = false, learning_rate = 0.001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, clip_grad = 0.5, betas = (0.9, 0.999), verbose = false)
+                    nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, memory_size = 0, trajectory_length = 1000, mono = false, learning_rate = 0.001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, clip_grad = 0.5, betas = (0.9, 0.999), actor_final_init_scale = nothing, verbose = false)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     !isnothing(drop_middle_layer)        &&  (network_depth = drop_middle_layer ? 1 : 2)
@@ -53,8 +53,11 @@ function create_agent(;action_space, state_space, use_gpu, rng, y, p, batch_size
     isnothing(learning_rate_critic)     &&  (learning_rate_critic = learning_rate)
     
     init = Flux.glorot_uniform(rng)
-    
-    behavior_actor = create_NNA(na = size(action_space)[1], ns = size(state_space)[1], use_gpu = use_gpu, is_actor = true, init = init, nna_scale = nna_scale, network_depth = network_depth, learning_rate = learning_rate, fun = fun)
+    # last actor layer ~ U(-scale, scale) as in Lillicrap et al. 2015; nothing = Glorot
+    final_init = isnothing(actor_final_init_scale) ? nothing :
+        (dims...) -> Float32(actor_final_init_scale) .* (2 .* rand(rng, Float32, dims...) .- 1)
+
+    behavior_actor = create_NNA(na = size(action_space)[1], ns = size(state_space)[1], use_gpu = use_gpu, is_actor = true, init = init, final_init = final_init, nna_scale = nna_scale, network_depth = network_depth, learning_rate = learning_rate, fun = fun)
 
     behavior_critic = create_NNA(na = size(action_space)[1], ns = size(state_space)[1], use_gpu = use_gpu, is_actor = false, init = init, nna_scale = nna_scale_critic, network_depth = network_depth_critic, learning_rate = learning_rate_critic, fun = fun_critic)
 
@@ -295,11 +298,14 @@ function update!(
 end
 
 
+# Runs in PostActStage, after reward/terminated were pushed: in PreActStage the
+# state trace is one entry ahead, which misaligns all traces by one index once
+# the circular buffer has wrapped around.
 function update!(
     policy::CustomDDPGPolicy,
     traj::Trajectory,
     ::AbstractEnv,
-    ::PreActStage,
+    ::PostActStage,
 )
     if length(size(policy.action_space)) == 2
         number_actuators = size(policy.action_space)[2]
@@ -365,6 +371,11 @@ function update!(policy::CustomDDPGPolicy, batch::NamedTuple{SARTS})
     # s, a, r, terminated, snext = send_to_device(device(policy), (s, a, r, new_t, snext))
 
     s, a, r, terminated, snext = send_to_device(device(policy), (s, a, r, terminated, snext))
+
+    # r is (1, B) in the mono case; as a row it would broadcast against the
+    # (B,) vectors below into a B×B target matrix.
+    r = vec(r)
+    terminated = vec(terminated)
 
     anext = Aₜ(snext)
     qₜ = Cₜ(vcat(snext, anext)) |> vec
