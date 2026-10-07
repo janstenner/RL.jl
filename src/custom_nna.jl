@@ -188,3 +188,8 @@ function (model::GaussianNetwork)(
           is_return_log_prob=is_return_log_prob,
           is_antithetic=is_antithetic)
 end
+
+# Deterministic (mean) action of the squashed Gaussian policy (SAC, SAC2):
+# normalizer(μ(pre(s))), the action the policy is trained around. `model.μ(s)`
+# alone skips `pre` and the tanh, i.e. it is not the policy's action.
+mean_action(model::GaussianNetwork, state) = model.normalizer.(first(model(state)))
