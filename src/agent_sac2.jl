@@ -46,6 +46,9 @@ Base.@kwdef mutable struct SACPolicy2 <: AbstractPolicy
     λ_targets = 0.7f0
     target_frac = 0.3f0
     verbose::Bool = false
+    # weight of the BC term in IL updates (TD3+BC style); nothing = off
+    bc_alpha::Union{Nothing,Float32} = nothing
+    last_bc_loss::Float32 = 0.0f0
 
     antithetic_mean_samples::Int = 16
     on_policy_n_batches::Int = 64
@@ -65,7 +68,7 @@ Base.@kwdef mutable struct SACPolicy2 <: AbstractPolicy
 end
 
 
-function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 7.0f0, min_σ = 2f-9, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false, on_policy_update_freq = 2500, λ_targets= 0.7f0, fear_factor = 0.1f0, target_frac = 0.3f0, verbose = false, antithetic_mean_samples = 16, on_policy_n_batches = 64, on_policy_epochs = 3)
+function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 7.0f0, min_σ = 2f-9, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false, on_policy_update_freq = 2500, λ_targets= 0.7f0, fear_factor = 0.1f0, target_frac = 0.3f0, verbose = false, antithetic_mean_samples = 16, on_policy_n_batches = 64, on_policy_epochs = 3, bc_alpha = nothing)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     !isnothing(drop_middle_layer)        &&  (network_depth = drop_middle_layer ? 1 : 2)
@@ -138,6 +141,7 @@ function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, 
             on_policy_update_freq = on_policy_update_freq,
             λ_targets = λ_targets,
             target_frac = target_frac,
+            bc_alpha = isnothing(bc_alpha) ? nothing : Float32(bc_alpha),
             verbose = verbose,
 
             antithetic_mean_samples = antithetic_mean_samples,
@@ -362,7 +366,9 @@ end
 
 
 
-function on_policy_update(p::SACPolicy2, traj::AbstractTrajectory; whole_trajectory = false)
+# `bc = true` only from update_IL: BC term (MSE of tanh(μ) to the expert
+# action) with the TD3+BC weighting of the actor objective.
+function on_policy_update(p::SACPolicy2, traj::AbstractTrajectory; whole_trajectory = false, bc::Bool = false)
 
     check_state_trees(p)
 
@@ -522,6 +528,16 @@ function on_policy_update(p::SACPolicy2, traj::AbstractTrajectory; whole_traject
 
 
                 actor_term = α * entropy - reward
+                if bc
+                    λ = ignore_derivatives() do
+                        p.bc_alpha / (mean(abs.(q)) + 1f-6)
+                    end
+                    bc_loss = mean((actor.normalizer.(μ) .- a_batch) .^ 2)
+                    ignore_derivatives() do
+                        p.last_bc_loss = bc_loss
+                    end
+                    actor_term = λ * actor_term + bc_loss
+                end
                 actor_term + fear_term
             end
             Flux.update!(p.actor_state_tree, p.actor, p_grad[1])
@@ -616,7 +632,7 @@ function update_IL(p::SACPolicy2, trajectory::AbstractTrajectory)
         next_state = trajectory[:next_state][:, :, start_idx:stop_idx],
     )
 
-    on_policy_update(p, temp_trajectory; whole_trajectory = true)
+    on_policy_update(p, temp_trajectory; whole_trajectory = true, bc = !isnothing(p.bc_alpha))
 end
 
 

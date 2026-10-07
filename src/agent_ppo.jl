@@ -66,7 +66,7 @@ function create_logσ(;logσ_is_network, ns, na, use_gpu, init, nna_scale, netwo
     return res
 end
 
-function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, noise = nothing, noise_scale = 90, clip_range_vf = nothing, dist = Normal, verbose = false)
+function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update_freq = 256, approximator = nothing, nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, tanh_end = false, n_envs = 1, clip1 = false, n_epochs = 4, n_microbatches = 4, normalize_advantage = true, logσ_is_network = false, start_steps = -1, start_policy = nothing, max_σ = 2.0f0, actor_loss_weight = 1.0f0, critic_loss_weight = 0.5f0, entropy_loss_weight = 0.00f0, clip_grad = 0.5, target_kl = 100.0, start_logσ = 0.0, betas = (0.9, 0.999), clip_range = 0.2f0, noise = nothing, noise_scale = 90, clip_range_vf = nothing, dist = Normal, bc_alpha = nothing, verbose = false)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     !isnothing(drop_middle_layer)        &&  (network_depth = drop_middle_layer ? 1 : 2)
@@ -136,6 +136,7 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
             noise = noise,
             noise_sampler = noise_sampler,
             noise_scale = noise_scale,
+            bc_alpha = isnothing(bc_alpha) ? nothing : Float32(bc_alpha),
             verbose = verbose,
         ),
         trajectory = 
@@ -143,7 +144,6 @@ function create_agent_ppo(;action_space, state_space, use_gpu, rng, y, p, update
                 capacity = update_freq,
                 state = Float32 => (size(state_space)[1], n_envs),
                 action = action_schema,
-                action_log_prob = Float32 => (n_envs),
                 reward = Float32 => (n_envs),
                 terminated = Bool => (n_envs,),
                 truncated = Bool => (n_envs,),
@@ -182,6 +182,9 @@ mutable struct PPOPolicy{A<:ActorCritic,D,R} <: AbstractPolicy
     noise_scale
     noise_step
     verbose::Bool
+    # weight of the BC term in IL updates (TD3+BC style); nothing = off
+    bc_alpha::Union{Nothing,Float32}
+    last_bc_loss::Float32
     last_action_log_prob::Vector{Float32}
     last_sigma::Vector{Float32}
     last_mu::Vector{Float32}
@@ -213,6 +216,7 @@ function PPOPolicy(;
     noise_sampler = nothing,
     noise_scale = 90.0,
     noise_step = 0,
+    bc_alpha = nothing,
     verbose = false,
 )
     PPOPolicy{typeof(approximator),dist,typeof(rng)}(
@@ -241,6 +245,8 @@ function PPOPolicy(;
         noise_scale,
         noise_step,
         verbose,
+        bc_alpha,
+        0.0f0,
         [0.0],
         [0.0],
         [0.0],
@@ -367,12 +373,7 @@ function (agent::Agent{<:PPOPolicy})(env::MultiThreadEnv)
         if agent.policy.clip1 && !(eltype(action) <: Integer)
             clamp!(action, -1.0, 1.0)
         end
-        logpdf_values = logpdf.(dist, action)
-        action_log_prob =
-            ndims(logpdf_values) == 2 ?
-            vec(sum(logpdf_values, dims=1)) :
-            vec(logpdf_values)
-        EnrichedAction(action; action_log_prob=action_log_prob)
+        EnrichedAction(action)
     end
 end
 
@@ -392,7 +393,6 @@ function update!(
         trajectory;
         state=state(env),
         action=action.action,
-        action_log_prob=action.action_log_prob
     )
 end
 
@@ -412,7 +412,6 @@ function update!(
         trajectory;
         state=state(env),
         action=action_store,
-        action_log_prob=policy.last_action_log_prob
     )
 end
 
@@ -463,21 +462,58 @@ function update_IL(p::PPOPolicy, trajectory::AbstractTrajectory)
     temp_trajectory = Trajectory(
         state = trajectory[:state][:, :, start_idx:stop_idx],
         action = action_window,
-        action_log_prob = trajectory[:action_log_prob][:, start_idx:stop_idx],
         reward = trajectory[:reward][:, start_idx:stop_idx],
         terminated = trajectory[:terminated][:, start_idx:stop_idx],
         truncated = trajectory[:truncated][:, start_idx:stop_idx],
         next_state = trajectory[:next_state][:, :, start_idx:stop_idx],
     )
 
-    _update!(p, temp_trajectory)
+    _update!(p, temp_trajectory; il = true)
 end
 
 
 
 
 
-function _update!(p::PPOPolicy, t::Any)
+# log π(a|s) per sample, the mean entropy and the BC loss of the PPO actor.
+# Shared by the log π_old recomputation at the start of _update! and the
+# clipped loss. BC: MSE of μ to the given actions (Gaussian, σ untouched) or
+# −log π (categorical).
+function _ppo_log_prob_entropy_bc(actor, s, a, a_discrete, to_device)
+    if actor isa GaussianNetwork
+        μ, logσ = actor(s)
+        bc_loss = mean((μ .- a) .^ 2)
+
+        if ndims(a) == 2
+            log_p′ₐ = vec(sum(normlogpdf(μ, exp.(logσ), a), dims=1))
+        else
+            log_p′ₐ = normlogpdf(μ, exp.(logσ), a)
+        end
+        entropy_loss =
+            mean(size(logσ, 1) * (log(2.0f0π) + 1) .+ sum(logσ; dims=1)) / 2
+    else
+        # actor is assumed to return discrete logits
+        logit′ = actor(s)
+        if ndims(logit′) == 1
+            logit′ = reshape(logit′, :, 1)
+        end
+
+        p′ = softmax(logit′)
+        log_p′ = logsoftmax(logit′)
+        if isnothing(a_discrete)
+            error("Categorical PPO expects integer actions in trajectory.")
+        end
+        n_actions = size(log_p′, 1)
+        one_hot_actions = to_device(Float32.(Flux.onehotbatch(a_discrete, 1:n_actions)))
+        log_p′ₐ = vec(sum(log_p′ .* one_hot_actions; dims=1))
+        entropy_loss = -mean(sum(p′ .* log_p′; dims=1))
+        bc_loss = -mean(log_p′ₐ)
+    end
+    return log_p′ₐ, entropy_loss, bc_loss
+end
+
+# `il = true` marks an update on expert data (called from update_IL).
+function _update!(p::PPOPolicy, t::Any; il::Bool = false)
     if p.verbose
         println("TRAIN!!!!!!!!")
     end
@@ -529,7 +565,17 @@ function _update!(p::PPOPolicy, t::Any)
     # end
 
     actions_flatten = flatten_batch(select_last_dim(t[:action], 1:n))
-    action_log_probs = select_last_dim(to_device(t[:action_log_prob]), 1:n)
+
+    # log π_old is always taken from the current policy, for online and IL
+    # (expert) data alike: every ratio starts at 1, also for rollout steps
+    # collected before an IL update and for expert actions, which have no
+    # behaviour log-probability of their own.
+    actions_all_host = collect(actions_flatten)
+    actions_all_discrete = eltype(actions_all_host) <: Integer ? Int.(vec(actions_all_host)) : nothing
+    action_log_probs, _, _ = _ppo_log_prob_entropy_bc(
+        AC.actor, to_device(collect(states_flatten_on_host)), to_device(actions_all_host),
+        actions_all_discrete, to_device,
+    )
 
     stop_update = false
 
@@ -555,9 +601,9 @@ function _update!(p::PPOPolicy, t::Any)
             adv = vec(advantages)[inds]
             old_v = vec(values)[inds]
 
-            clamp!(log_p, log(1e-8), Inf) # clamp old_prob to 1e-8 to avoid inf
-
-            if p.normalize_advantage
+            # Not in IL updates: centering would give about half of the expert
+            # actions a negative advantage and push μ away from them.
+            if p.normalize_advantage && !il
                 adv = (adv .- mean(adv)) ./ clamp(std(adv), 1e-8, 1000.0)
             end
             
@@ -570,36 +616,14 @@ function _update!(p::PPOPolicy, t::Any)
                 AC.critic_state_tree = Flux.setup(AC.optimizer_critic, AC.critic)
             end
 
-            g_actor, g_critic = Flux.gradient(AC.actor, AC.critic) do actor, critic
+            loss_value, (g_actor, g_critic) = Flux.withgradient(AC.actor, AC.critic) do actor, critic
                 v′ = critic(s) |> vec
-                if actor isa GaussianNetwork
-                    μ, logσ = actor(s)
-                    
-                    if ndims(a) == 2
-                        log_p′ₐ = vec(sum(normlogpdf(μ, exp.(logσ), a), dims=1))
-                    else
-                        log_p′ₐ = normlogpdf(μ, exp.(logσ), a)
-                    end
-                    entropy_loss =
-                        mean(size(logσ, 1) * (log(2.0f0π) + 1) .+ sum(logσ; dims=1)) / 2
-                else
-                    # actor is assumed to return discrete logits
-                    logit′ = actor(s)
-                    if ndims(logit′) == 1
-                        logit′ = reshape(logit′, :, 1)
-                    end
-
-                    p′ = softmax(logit′)
-                    log_p′ = logsoftmax(logit′)
-                    if isnothing(a_discrete)
-                        error("Categorical PPO expects integer actions in trajectory.")
-                    end
-                    n_actions = size(log_p′, 1)
-                    one_hot_actions = to_device(Float32.(Flux.onehotbatch(a_discrete, 1:n_actions)))
-                    log_p′ₐ = vec(sum(log_p′ .* one_hot_actions; dims=1))
-                    entropy_loss = -mean(sum(p′ .* log_p′; dims=1))
-                end
-                ratio = exp.(log_p′ₐ .- log_p)
+                log_p′ₐ, entropy_loss, bc_loss = _ppo_log_prob_entropy_bc(actor, s, a, a_discrete, to_device)
+                # Expert actions can lie far in the tail of a narrow policy, so
+                # log π may rise by hundreds within one update; with a negative
+                # advantage the unclipped term then overflows. Bound the
+                # log-ratio (no gradient beyond the bound) to keep exp finite.
+                ratio = exp.(clamp.(log_p′ₐ .- log_p, -20.0f0, 20.0f0))
 
                 ignore() do
                     approx_kl_div = mean((ratio .- 1) - log.(ratio)) |> send_to_host
@@ -616,6 +640,19 @@ function _update!(p::PPOPolicy, t::Any)
                 surr2 = clamp.(ratio, 1.0f0 - clip_range, 1.0f0 + clip_range) .* adv
 
                 actor_loss = -mean(min.(surr1, surr2))
+
+                if il && !isnothing(p.bc_alpha)
+                    # TD3+BC transferred to PPO: the clipped term (unnormalized
+                    # advantages in IL updates) is scaled to α / mean|A|, the
+                    # BC term keeps weight 1.
+                    λ = ignore_derivatives() do
+                        p.bc_alpha / (mean(abs.(adv)) + 1f-8)
+                    end
+                    actor_loss = λ * actor_loss + bc_loss
+                    ignore_derivatives() do
+                        p.last_bc_loss = bc_loss
+                    end
+                end
 
                 if isnothing(clip_range_vf) || clip_range_vf == 0.0
                     critic_loss = mean((r .- v′) .^ 2)
@@ -638,6 +675,11 @@ function _update!(p::PPOPolicy, t::Any)
                 loss
             end
             
+            if !isfinite(loss_value)
+                @warn "PPO: skipping a microbatch with non-finite loss" loss_value epoch i maxlog = 10
+                continue
+            end
+
             if !stop_update
                 Flux.update!(AC.actor_state_tree, AC.actor, g_actor)
                 Flux.update!(AC.critic_state_tree, AC.critic, g_critic)

@@ -41,7 +41,7 @@ end
 function create_agent(;action_space, state_space, use_gpu, rng, y, p, batch_size,
                     start_steps, start_policy, update_after, update_freq, update_loops = 1, reset_stage = POST_EPISODE_STAGE, act_limit,
                     act_noise, noise_hold = 1,
-                    nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, memory_size = 0, trajectory_length = 1000, mono = false, learning_rate = 0.001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, clip_grad = 0.5, betas = (0.9, 0.999), actor_final_init_scale = nothing, verbose = false)
+                    nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, memory_size = 0, trajectory_length = 1000, mono = false, learning_rate = 0.001, learning_rate_critic = nothing, fun = relu, fun_critic = nothing, clip_grad = 0.5, betas = (0.9, 0.999), actor_final_init_scale = nothing, bc_alpha = nothing, verbose = false)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     !isnothing(drop_middle_layer)        &&  (network_depth = drop_middle_layer ? 1 : 2)
@@ -105,6 +105,7 @@ function create_agent(;action_space, state_space, use_gpu, rng, y, p, batch_size
             noise_hold = noise_hold,
             last_noise = last_noise,
             memory_size = memory_size,
+            bc_alpha = isnothing(bc_alpha) ? nothing : Float32(bc_alpha),
             verbose = verbose,
         ),
         trajectory = 
@@ -156,6 +157,9 @@ Base.@kwdef mutable struct CustomDDPGPolicy{
     last_noise
     memory_size
     verbose::Bool = false
+    # weight of the BC term in IL updates (TD3+BC style); nothing = off
+    bc_alpha::Union{Nothing,Float32} = nothing
+    last_bc_loss::Float32 = 0.0f0
 
     update_step::Int = 0
     actor_loss::Float32 = 0.0f0
@@ -334,13 +338,14 @@ function _update!(p::CustomDDPGPolicy, t::AbstractTrajectory)
 
     for i = 1:p.update_loops
         inds, batch = pde_sample(p.rng, t, BatchSampler{SARTS}(p.batch_size), number_actuators)
-        update!(p, batch)
+        update!(p, batch; bc = !isnothing(p.bc_alpha))
     end
 end
 
 update_IL(p::CustomDDPGPolicy, t::AbstractTrajectory) = _update!(p, t)
 
-function update!(policy::CustomDDPGPolicy, batch::NamedTuple{SARTS})
+# `bc = true` only from IL updates: TD3+BC actor loss on expert data.
+function update!(policy::CustomDDPGPolicy, batch::NamedTuple{SARTS}; bc::Bool = false)
     
     s, a, r, terminated, snext = batch
 
@@ -381,6 +386,7 @@ function update!(policy::CustomDDPGPolicy, batch::NamedTuple{SARTS})
     qₜ = Cₜ(vcat(snext, anext)) |> vec
     #qₜ = - abs.( (s .* 50 - 30 .* Aₜ(snext)) / 50 ) |> vec
     qnext = r .+ y .* (1 .- terminated) .* qₜ
+    a_expert = a
     a = Flux.unsqueeze(a, ndims(a)+1)
 
     critic_grad = Flux.gradient(C) do critic
@@ -394,7 +400,21 @@ function update!(policy::CustomDDPGPolicy, batch::NamedTuple{SARTS})
     Flux.update!(policy.critic_state_tree, C, critic_grad[1])
 
     actor_grad = Flux.gradient(A) do actor
-        loss = -mean(C(vcat(s, actor(s))))
+        π_s = actor(s)
+        if bc
+            # TD3+BC: λ = α / mean|Q| is treated as a constant
+            q = vec(C(vcat(s, π_s)))
+            λ = ignore_derivatives() do
+                policy.bc_alpha / (mean(abs.(q)) + 1f-6)
+            end
+            bc_loss = mean((π_s .- a_expert) .^ 2)
+            loss = -λ * mean(q) + bc_loss
+            ignore_derivatives() do
+                policy.last_bc_loss = bc_loss
+            end
+        else
+            loss = -mean(C(vcat(s, π_s)))
+        end
         #loss = abs.( (s .* 500 - 30 .* A(s)) / 500 )[1]
         ignore() do
             policy.actor_loss = loss

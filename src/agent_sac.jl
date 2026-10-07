@@ -39,6 +39,9 @@ Base.@kwdef mutable struct SACPolicy <: AbstractPolicy
     device_rng =Random.GLOBAL_RNG
     use_popart = false
     verbose::Bool = false
+    # weight of the BC term in IL updates (TD3+BC style); nothing = off
+    bc_alpha::Union{Nothing,Float32} = nothing
+    last_bc_loss::Float32 = 0.0f0
 
     # Logging
     last_reward_term::Float32 =0.0f0
@@ -54,7 +57,7 @@ Base.@kwdef mutable struct SACPolicy <: AbstractPolicy
 end
 
 
-function create_agent_sac(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 2.0f0, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false, verbose = false)
+function create_agent_sac(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 2.0f0, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false, bc_alpha = nothing, verbose = false)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     !isnothing(drop_middle_layer)        &&  (network_depth = drop_middle_layer ? 1 : 2)
@@ -119,6 +122,7 @@ function create_agent_sac(;action_space, state_space, use_gpu = false, rng, y, t
             rng = rng,
             device_rng = rng,
             use_popart = use_popart,
+            bc_alpha = isnothing(bc_alpha) ? nothing : Float32(bc_alpha),
             verbose = verbose,
         ),
         trajectory = 
@@ -245,7 +249,7 @@ function _update!(p::SACPolicy, t::AbstractTrajectory)
 
     for i = 1:p.update_loops
         inds, batch = sample(p.rng, t, BatchSampler{SARTTS}(p.batch_size))
-        update!(p, batch)
+        update!(p, batch; bc = !isnothing(p.bc_alpha))
     end
 end
 
@@ -253,8 +257,11 @@ update_IL(p::SACPolicy, t::AbstractTrajectory) = _update!(p, t)
 
 
 
-function update!(p::SACPolicy, batch::NamedTuple{SARTTS})
+# `bc = true` only from IL updates: BC term (MSE of the mean action
+# tanh(μ) to the expert action) with the TD3+BC weighting of the SAC objective.
+function update!(p::SACPolicy, batch::NamedTuple{SARTTS}; bc::Bool = false)
     s, a, r, ter, trun, s′ = send_to_device(device(p.qnetwork1), batch)
+    a_expert = a
 
     γ, τ, α = p.γ, p.τ, p.α
 
@@ -321,8 +328,8 @@ function update!(p::SACPolicy, batch::NamedTuple{SARTTS})
     
     # Train Policy
     p_grad = Flux.gradient(p.actor) do actor
-        a, log_π = actor(p.device_rng, s; is_sampling=true, is_return_log_prob=true)
-        q_input = vcat(s, a)
+        a_π, log_π, μ_π, _ = actor(p.device_rng, s; is_sampling=true, is_return_log_prob=true, is_return_params=true)
+        q_input = vcat(s, a_π)
         q = min.(p.qnetwork1(q_input), p.qnetwork2(q_input))
         reward = mean(q)
         entropy = mean(log_π)
@@ -331,7 +338,19 @@ function update!(p::SACPolicy, batch::NamedTuple{SARTTS})
             p.last_entropy_term = α * entropy
             p.last_actor_loss = α * entropy - reward
         end
-        α * entropy - reward
+        actor_term = α * entropy - reward
+        if bc
+            λ = ignore_derivatives() do
+                p.bc_alpha / (mean(abs.(q)) + 1f-6)
+            end
+            bc_loss = mean((actor.normalizer.(μ_π) .- a_expert) .^ 2)
+            ignore_derivatives() do
+                p.last_bc_loss = bc_loss
+            end
+            λ * actor_term + bc_loss
+        else
+            actor_term
+        end
     end
     Flux.update!(p.actor_state_tree, p.actor, p_grad[1])
 

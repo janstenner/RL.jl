@@ -123,6 +123,9 @@ Base.@kwdef mutable struct SACLSTMPolicy <: AbstractPolicy
     rng = Random.GLOBAL_RNG
     use_popart::Bool = false
     verbose::Bool = false
+    # weight of the BC term in IL updates (TD3+BC style); nothing = off
+    bc_alpha::Union{Nothing,Float32} = nothing
+    last_bc_loss::Float32 = 0.0f0
     # Rollout memory is separate from trainable parameters and replay data.
     actor_internal_state = nothing
     prev_action = nothing
@@ -178,7 +181,7 @@ function create_agent_sac_lstm(; action_space, state_space, use_gpu=false, rng, 
     target_entropy=nothing, use_popart=false, verbose=false,
     observ_embedding_size=32, action_embedding_size=16, reward_embedding_size=16,
     rnn_hidden_size=nothing, rnn_hidden_size_critic=nothing, sequence_length=64,
-    episode_starts_only=false)
+    episode_starts_only=false, bc_alpha=nothing)
 
     isnothing(nna_scale_critic) && (nna_scale_critic = nna_scale)
     !isnothing(drop_middle_layer) && (network_depth = drop_middle_layer ? 1 : 2)
@@ -230,7 +233,8 @@ function create_agent_sac_lstm(; action_space, state_space, use_gpu=false, rng, 
         log_α=Float32[log(a)], optimizer_log_α=Optimisers.Adam(lr_alpha),
         batch_size, sequence_length, episode_starts_only, start_steps, start_policy, update_after,
         update_freq, update_loops, automatic_entropy_tuning, lr_alpha=Float32(lr_alpha),
-        target_entropy=Float32(target_entropy), rng, use_popart, verbose)
+        target_entropy=Float32(target_entropy), rng, use_popart, verbose,
+        bc_alpha=isnothing(bc_alpha) ? nothing : Float32(bc_alpha))
     reset_sac_lstm!(policy; batch_size=n_agents)
     Agent(; policy, trajectory=CircularArrayTrajectory(;
         capacity=trajectory_length,
@@ -312,13 +316,13 @@ function update!(p::SACLSTMPolicy, t::AbstractTrajectory, ::AbstractEnv, ::PostA
     _update!(p, t)
 end
 
-function _update!(p::SACLSTMPolicy, t::AbstractTrajectory)
+function _update!(p::SACLSTMPolicy, t::AbstractTrajectory; bc::Bool=false)
     for _ in 1:p.update_loops
-        update!(p, sample_sac_lstm(p, t))
+        update!(p, sample_sac_lstm(p, t); bc)
     end
     return nothing
 end
-update_IL(p::SACLSTMPolicy, t::AbstractTrajectory) = _update!(p, t)
+update_IL(p::SACLSTMPolicy, t::AbstractTrajectory) = _update!(p, t; bc=!isnothing(p.bc_alpha))
 
 _sac_lstm_frame(x, lane, index) = ndims(x) == 3 ? view(x, :, lane, index) : view(x, :, index)
 _sac_lstm_scalar(x, lane, index) = ndims(x) == 1 ? x[index] : x[lane, index]
@@ -416,7 +420,9 @@ function _sac_lstm_target(p::SACLSTMPolicy, batch)
     return targets, next_log_pi[:, :, 2:end]
 end
 
-function update!(p::SACLSTMPolicy, batch::NamedTuple{(:obs, :prev_actions, :prev_rewards, :actions, :rewards, :terminated, :mask)})
+# `bc = true` only from IL updates: BC term (MSE of the mean action tanh(μ)
+# to the expert action, masked) with the TD3+BC weighting of the actor objective.
+function update!(p::SACLSTMPolicy, batch::NamedTuple{(:obs, :prev_actions, :prev_rewards, :actions, :rewards, :terminated, :mask)}; bc::Bool=false)
     batch = send_to_device(device(p.actor), batch)
     mask = batch.mask
     sum(mask) > 0 || throw(ArgumentError("batch has no valid transitions"))
@@ -459,7 +465,20 @@ function update!(p::SACLSTMPolicy, batch::NamedTuple{(:obs, :prev_actions, :prev
             p.last_reward_term, p.last_entropy_term = value, entropy_term
             p.last_actor_loss = entropy_term - value
         end
-        entropy_term - value
+        if bc
+            λ = ignore_derivatives() do
+                p.bc_alpha / (_sac_lstm_mean(abs.(min.(q1, q2)), mask) + 1f-6)
+            end
+            mean_actions, _ = sac_lstm_actions(actor, batch.obs, batch.prev_actions,
+                                               batch.prev_rewards, p.rng; deterministic=true)
+            bc_loss = _sac_lstm_mean(mean((mean_actions[:, :, 1:end-1] .- batch.actions) .^ 2; dims=1), mask)
+            ignore_derivatives() do
+                p.last_bc_loss = bc_loss
+            end
+            λ * (entropy_term - value) + bc_loss
+        else
+            entropy_term - value
+        end
     end
     Flux.update!(p.actor_state_tree, p.actor, actor_grad[1])
     if p.automatic_entropy_tuning
