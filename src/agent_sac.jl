@@ -42,6 +42,8 @@ Base.@kwdef mutable struct SACPolicy <: AbstractPolicy
     # weight of the BC term in IL updates (TD3+BC style); nothing = off
     bc_alpha::Union{Nothing,Float32} = nothing
     last_bc_loss::Float32 = 0.0f0
+    # share of expert samples accepted by the Q-filter in the last BC update
+    last_bc_accept::Float32 = 0.0f0
 
     # Logging
     last_reward_term::Float32 =0.0f0
@@ -257,7 +259,7 @@ update_IL(p::SACPolicy, t::AbstractTrajectory) = _update!(p, t)
 
 
 
-# `bc = true` only from IL updates: BC term (MSE of the mean action
+# `bc = true` only from IL updates: Q-filtered BC term (MSE of the mean action
 # tanh(μ) to the expert action) with the TD3+BC weighting of the SAC objective.
 function update!(p::SACPolicy, batch::NamedTuple{SARTTS}; bc::Bool = false)
     s, a, r, ter, trun, s′ = send_to_device(device(p.qnetwork1), batch)
@@ -343,9 +345,18 @@ function update!(p::SACPolicy, batch::NamedTuple{SARTTS}; bc::Bool = false)
             λ = ignore_derivatives() do
                 p.bc_alpha / (mean(abs.(q)) + 1f-6)
             end
-            bc_loss = mean((actor.normalizer.(μ_π) .- a_expert) .^ 2)
+            a_mean = actor.normalizer.(μ_π)
+            # Q-filter (Nair et al. 2018) against the policy's mean action;
+            # rejected samples count 0.
+            accept = ignore_derivatives() do
+                q_expert = min.(p.qnetwork1(vcat(s, a_expert)), p.qnetwork2(vcat(s, a_expert)))
+                q_mean = min.(p.qnetwork1(vcat(s, a_mean)), p.qnetwork2(vcat(s, a_mean)))
+                Float32.(q_expert .> q_mean)
+            end
+            bc_loss = mean(accept .* mean((a_mean .- a_expert) .^ 2; dims = 1))
             ignore_derivatives() do
                 p.last_bc_loss = bc_loss
+                p.last_bc_accept = mean(accept)
             end
             λ * actor_term + bc_loss
         else

@@ -49,6 +49,8 @@ Base.@kwdef mutable struct SACPolicy2 <: AbstractPolicy
     # weight of the BC term in IL updates (TD3+BC style); nothing = off
     bc_alpha::Union{Nothing,Float32} = nothing
     last_bc_loss::Float32 = 0.0f0
+    # share of expert samples accepted by the Q-filter in the last BC update
+    last_bc_accept::Float32 = 0.0f0
 
     antithetic_mean_samples::Int = 16
     on_policy_n_batches::Int = 64
@@ -366,8 +368,8 @@ end
 
 
 
-# `bc = true` only from update_IL: BC term (MSE of tanh(μ) to the expert
-# action) with the TD3+BC weighting of the actor objective.
+# `bc = true` only from update_IL: Q-filtered BC term (MSE of tanh(μ) to the
+# expert action) with the TD3+BC weighting of the actor objective.
 function on_policy_update(p::SACPolicy2, traj::AbstractTrajectory; whole_trajectory = false, bc::Bool = false)
 
     check_state_trees(p)
@@ -532,9 +534,18 @@ function on_policy_update(p::SACPolicy2, traj::AbstractTrajectory; whole_traject
                     λ = ignore_derivatives() do
                         p.bc_alpha / (mean(abs.(q)) + 1f-6)
                     end
-                    bc_loss = mean((actor.normalizer.(μ) .- a_batch) .^ 2)
+                    a_mean = actor.normalizer.(μ)
+                    # Q-filter (Nair et al. 2018) against the policy's mean action;
+                    # rejected samples count 0.
+                    accept = ignore_derivatives() do
+                        q_expert = min.(p.qnetwork1(vcat(s_batch, a_batch)), p.qnetwork2(vcat(s_batch, a_batch)))
+                        q_mean = min.(p.qnetwork1(vcat(s_batch, a_mean)), p.qnetwork2(vcat(s_batch, a_mean)))
+                        Float32.(q_expert .> q_mean)
+                    end
+                    bc_loss = mean(accept .* mean((a_mean .- a_batch) .^ 2; dims = 1))
                     ignore_derivatives() do
                         p.last_bc_loss = bc_loss
+                        p.last_bc_accept = mean(accept)
                     end
                     actor_term = λ * actor_term + bc_loss
                 end

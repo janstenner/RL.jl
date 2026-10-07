@@ -126,6 +126,8 @@ Base.@kwdef mutable struct SACLSTMPolicy <: AbstractPolicy
     # weight of the BC term in IL updates (TD3+BC style); nothing = off
     bc_alpha::Union{Nothing,Float32} = nothing
     last_bc_loss::Float32 = 0.0f0
+    # share of expert samples accepted by the Q-filter in the last BC update
+    last_bc_accept::Float32 = 0.0f0
     # Rollout memory is separate from trainable parameters and replay data.
     actor_internal_state = nothing
     prev_action = nothing
@@ -420,8 +422,8 @@ function _sac_lstm_target(p::SACLSTMPolicy, batch)
     return targets, next_log_pi[:, :, 2:end]
 end
 
-# `bc = true` only from IL updates: BC term (MSE of the mean action tanh(μ)
-# to the expert action, masked) with the TD3+BC weighting of the actor objective.
+# `bc = true` only from IL updates: Q-filtered BC term (MSE of the mean action
+# tanh(μ) to the expert action, masked) with the TD3+BC weighting of the actor objective.
 function update!(p::SACLSTMPolicy, batch::NamedTuple{(:obs, :prev_actions, :prev_rewards, :actions, :rewards, :terminated, :mask)}; bc::Bool=false)
     batch = send_to_device(device(p.actor), batch)
     mask = batch.mask
@@ -471,9 +473,18 @@ function update!(p::SACLSTMPolicy, batch::NamedTuple{(:obs, :prev_actions, :prev
             end
             mean_actions, _ = sac_lstm_actions(actor, batch.obs, batch.prev_actions,
                                                batch.prev_rewards, p.rng; deterministic=true)
-            bc_loss = _sac_lstm_mean(mean((mean_actions[:, :, 1:end-1] .- batch.actions) .^ 2; dims=1), mask)
+            a_mean = mean_actions[:, :, 1:end-1]
+            # Q-filter (Nair et al. 2018) against the policy's mean action, with the
+            # same critic history; rejected and padded steps count 0.
+            accept = ignore_derivatives() do
+                qe1, qe2 = _sac_lstm_qheads(p.critic, critic_hidden, obs, batch.actions)
+                qm1, qm2 = _sac_lstm_qheads(p.critic, critic_hidden, obs, a_mean)
+                Float32.(min.(qe1, qe2) .> min.(qm1, qm2))
+            end
+            bc_loss = _sac_lstm_mean(accept .* mean((a_mean .- batch.actions) .^ 2; dims=1), mask)
             ignore_derivatives() do
                 p.last_bc_loss = bc_loss
+                p.last_bc_accept = _sac_lstm_mean(accept, mask)
             end
             λ * (entropy_term - value) + bc_loss
         else

@@ -160,6 +160,8 @@ Base.@kwdef mutable struct CustomDDPGPolicy{
     # weight of the BC term in IL updates (TD3+BC style); nothing = off
     bc_alpha::Union{Nothing,Float32} = nothing
     last_bc_loss::Float32 = 0.0f0
+    # share of expert samples accepted by the Q-filter in the last BC update
+    last_bc_accept::Float32 = 0.0f0
 
     update_step::Int = 0
     actor_loss::Float32 = 0.0f0
@@ -344,7 +346,8 @@ end
 
 update_IL(p::CustomDDPGPolicy, t::AbstractTrajectory) = _update!(p, t)
 
-# `bc = true` only from IL updates: TD3+BC actor loss on expert data.
+# `bc = true` only from IL updates: TD3+BC actor loss on expert data with a
+# Q-filter on the BC term.
 function update!(policy::CustomDDPGPolicy, batch::NamedTuple{SARTS}; bc::Bool = false)
     
     s, a, r, terminated, snext = batch
@@ -407,10 +410,16 @@ function update!(policy::CustomDDPGPolicy, batch::NamedTuple{SARTS}; bc::Bool = 
             λ = ignore_derivatives() do
                 policy.bc_alpha / (mean(abs.(q)) + 1f-6)
             end
-            bc_loss = mean((π_s .- a_expert) .^ 2)
+            # Q-filter (Nair et al. 2018): imitate only where the critic rates
+            # the expert action above the policy's own; rejected samples count 0.
+            accept = ignore_derivatives() do
+                Float32.(vec(C(vcat(s, a_expert))) .> q)
+            end
+            bc_loss = mean(accept .* vec(mean((π_s .- a_expert) .^ 2; dims = 1)))
             loss = -λ * mean(q) + bc_loss
             ignore_derivatives() do
                 policy.last_bc_loss = bc_loss
+                policy.last_bc_accept = mean(accept)
             end
         else
             loss = -mean(C(vcat(s, π_s)))

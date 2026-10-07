@@ -5,7 +5,8 @@
 #   - optional LayerNorm in the critic (and actor) hidden layers,
 #   - small uniform init of the last actor layer (Lillicrap et al. 2015),
 #   - TD3+BC actor loss for imitation learning via `update_IL`
-#     (Fujimoto & Gu 2021, arXiv 2106.06860).
+#     (Fujimoto & Gu 2021, arXiv 2106.06860), with the BC term restricted by
+#     a Q-filter (Nair et al. 2018, arXiv 1709.10089).
 #
 # Differences to agent_ddpg.jl besides the algorithm itself:
 #   - transitions are stored with an explicit `next_state` and the policy is
@@ -189,6 +190,8 @@ Base.@kwdef mutable struct TD3Policy{R} <: AbstractPolicy
     last_q1_mean::Float32 = 0.0f0
     last_target_q_mean::Float32 = 0.0f0
     last_bc_loss::Float32 = 0.0f0
+    # share of expert samples accepted by the Q-filter in the last BC update
+    last_bc_accept::Float32 = 0.0f0
     # fraction of actor outputs in the batch with |a| > 0.99 (tanh saturation)
     last_action_saturation::Float32 = 0.0f0
 end
@@ -367,8 +370,16 @@ function update!(policy::TD3Policy, batch::NamedTuple; bc::Bool = false)
             λ = ignore_derivatives() do
                 policy.bc_alpha / (mean(abs.(q)) + 1f-6)
             end
-            bc_loss = mean((π_s .- a) .^ 2)
+            # Q-filter (Nair et al. 2018): imitate only where the critic rates
+            # the expert action above the policy's own; rejected samples count 0.
+            accept = ignore_derivatives() do
+                Float32.(vec(C1(vcat(s, a))) .> q)
+            end
+            bc_loss = mean(accept .* vec(mean((π_s .- a) .^ 2; dims = 1)))
             loss = -λ * mean(q) + bc_loss
+            ignore_derivatives() do
+                policy.last_bc_accept = mean(accept)
+            end
         else
             bc_loss = 0.0f0
             loss = -mean(q)

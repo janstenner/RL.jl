@@ -185,6 +185,7 @@ mutable struct PPOPolicy{A<:ActorCritic,D,R} <: AbstractPolicy
     # weight of the BC term in IL updates (TD3+BC style); nothing = off
     bc_alpha::Union{Nothing,Float32}
     last_bc_loss::Float32
+    last_bc_accept::Float32
     last_action_log_prob::Vector{Float32}
     last_sigma::Vector{Float32}
     last_mu::Vector{Float32}
@@ -246,6 +247,7 @@ function PPOPolicy(;
         noise_step,
         verbose,
         bc_alpha,
+        0.0f0,
         0.0f0,
         [0.0],
         [0.0],
@@ -475,14 +477,14 @@ end
 
 
 
-# log π(a|s) per sample, the mean entropy and the BC loss of the PPO actor.
-# Shared by the log π_old recomputation at the start of _update! and the
-# clipped loss. BC: MSE of μ to the given actions (Gaussian, σ untouched) or
-# −log π (categorical).
+# log π(a|s) per sample, the mean entropy and the per-sample BC loss of the
+# PPO actor. Shared by the log π_old recomputation at the start of _update!
+# and the clipped loss. BC: squared error of μ to the given actions (Gaussian,
+# σ untouched) or −log π (categorical).
 function _ppo_log_prob_entropy_bc(actor, s, a, a_discrete, to_device)
     if actor isa GaussianNetwork
         μ, logσ = actor(s)
-        bc_loss = mean((μ .- a) .^ 2)
+        bc_loss = vec(mean((μ .- a) .^ 2; dims=1))
 
         if ndims(a) == 2
             log_p′ₐ = vec(sum(normlogpdf(μ, exp.(logσ), a), dims=1))
@@ -507,7 +509,7 @@ function _ppo_log_prob_entropy_bc(actor, s, a, a_discrete, to_device)
         one_hot_actions = to_device(Float32.(Flux.onehotbatch(a_discrete, 1:n_actions)))
         log_p′ₐ = vec(sum(log_p′ .* one_hot_actions; dims=1))
         entropy_loss = -mean(sum(p′ .* log_p′; dims=1))
-        bc_loss = -mean(log_p′ₐ)
+        bc_loss = -log_p′ₐ
     end
     return log_p′ₐ, entropy_loss, bc_loss
 end
@@ -644,13 +646,20 @@ function _update!(p::PPOPolicy, t::Any; il::Bool = false)
                 if il && !isnothing(p.bc_alpha)
                     # TD3+BC transferred to PPO: the clipped term (unnormalized
                     # advantages in IL updates) is scaled to α / mean|A|, the
-                    # BC term keeps weight 1.
+                    # BC term keeps weight 1. Filter as in Self-Imitation
+                    # Learning (Oh et al. 2018), the PPO analogue of the
+                    # Q-filter: imitate only expert actions with A > 0.
                     λ = ignore_derivatives() do
                         p.bc_alpha / (mean(abs.(adv)) + 1f-8)
                     end
-                    actor_loss = λ * actor_loss + bc_loss
+                    accept = ignore_derivatives() do
+                        Float32.(adv .> 0)
+                    end
+                    bc_term = mean(accept .* bc_loss)
+                    actor_loss = λ * actor_loss + bc_term
                     ignore_derivatives() do
-                        p.last_bc_loss = bc_loss
+                        p.last_bc_loss = bc_term
+                        p.last_bc_accept = mean(accept)
                     end
                 end
 
