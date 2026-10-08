@@ -70,7 +70,7 @@ Base.@kwdef mutable struct SACPolicy2 <: AbstractPolicy
 end
 
 
-function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 7.0f0, min_σ = 2f-9, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false, on_policy_update_freq = 2500, λ_targets= 0.7f0, fear_factor = 0.1f0, target_frac = 0.3f0, verbose = false, antithetic_mean_samples = 16, on_policy_n_batches = 64, on_policy_epochs = 3, bc_alpha = nothing)
+function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 7.0f0, min_σ = 2f-9, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false, on_policy_update_freq = 2500, λ_targets= 0.7f0, fear_factor = 0.1f0, target_frac = 0.3f0, verbose = false, antithetic_mean_samples = 16, on_policy_n_batches = 64, on_policy_epochs = 3, bc_alpha = nothing, weight_decay = 1e-4)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     !isnothing(drop_middle_layer)        &&  (network_depth = drop_middle_layer ? 1 : 2)
@@ -113,9 +113,9 @@ function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, 
             target_qnetwork2 = target_qnetwork2,
 
 
-            optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas, 1e-4, 1e-8;)),
-            optimizer_qnetwork1 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate_critic, betas, 1e-4, 1e-8;)),
-            optimizer_qnetwork2 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate_critic, betas, 1e-4, 1e-8;)),
+            optimizer_actor = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate, betas, weight_decay, 1e-8;)),
+            optimizer_qnetwork1 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate_critic, betas, weight_decay, 1e-8;)),
+            optimizer_qnetwork2 = Optimisers.OptimiserChain(Optimisers.ClipNorm(clip_grad), Optimisers.AdamW(learning_rate_critic, betas, weight_decay, 1e-8;)),
 
             action_space = action_space,
             state_space = state_space,
@@ -368,6 +368,61 @@ end
 
 
 
+# λ-return targets for the on-policy update (copy of `td_lambda_targets` in
+# agent_ppo3.jl with two changes): the last sample of the window bootstraps
+# fully from its next value (as in GAE; Gλ is not defined beyond the window),
+# and `path_bonus[t]` is added where G_{t+1} stands in for V(s_{t+1}) - for
+# soft values -α E[log π(·|s_{t+1})], which a Q estimate of the taken action
+# does not contain.
+function td_lambda_targets_sac2(
+    rewards::Vector{Float32},
+    terminated::Vector{Bool},
+    truncated::Vector{Bool},
+    next_values::Vector{Float32},
+    γ::Float32=0.99f0;
+    λ::Float32=0.7f0,
+    path_bonus::Union{Nothing,Vector{Float32}}=nothing,
+) :: Vector{Float32}
+    T = length(rewards)
+    targets = similar(rewards)
+    Gλ = 0f0
+
+    for t in T:-1:1
+        term = terminated[t]
+        trunc = truncated[t]
+        done = term || trunc
+        bootstrap = !term  # trunc => true, echte termination => false
+
+        G_next = (done || t == T) ? (next_values[t] * bootstrap) :
+                 isnothing(path_bonus) ? Gλ : Gλ + path_bonus[t]
+
+        Gλ = rewards[t] + γ * ((1f0 - λ) * next_values[t] + λ * G_next) * bootstrap
+        targets[t] = Gλ
+    end
+    return targets
+end
+
+function td_lambda_targets_sac2(
+    rewards::AbstractMatrix,
+    terminated::AbstractMatrix,
+    truncated::AbstractMatrix,
+    next_values::AbstractMatrix,
+    γ::Float32=0.99f0;
+    λ::Float32=0.7f0,
+    path_bonus::Union{Nothing,AbstractMatrix}=nothing,
+) :: AbstractMatrix
+
+    results = zeros(Float32, size(rewards))
+
+    for i in 1:size(rewards, 1)
+        bonus_i = isnothing(path_bonus) ? nothing : Float32.(path_bonus[i, :])
+        results[i, :] = td_lambda_targets_sac2(rewards[i, :], terminated[i, :], truncated[i, :], next_values[i, :], γ; λ=λ, path_bonus=bonus_i)
+    end
+
+    return results
+end
+
+
 # `bc = true` only from update_IL: Q-filtered BC term (MSE of tanh(μ) to the
 # expert action) with the TD3+BC weighting of the actor objective.
 function on_policy_update(p::SACPolicy2, traj::AbstractTrajectory; whole_trajectory = false, bc::Bool = false)
@@ -410,8 +465,13 @@ function on_policy_update(p::SACPolicy2, traj::AbstractTrajectory; whole_traject
 
     n_envs = size(ter, 1)
     next_values = reshape( next_values, n_envs, :)
-    
-    targets = td_lambda_targets(r, ter, trun, next_values, γ; λ = p.λ_targets)
+
+    # soft λ-return: where G_{t+1} replaces V(s_{t+1}), add the entropy bonus
+    # -α E[log π(·|s_{t+1})] (antithetic estimate) that the Q estimate of the
+    # taken action lacks
+    path_bonus = reshape(-α .* acc_logp, n_envs, :)
+
+    targets = td_lambda_targets_sac2(r, ter, trun, next_values, γ; λ = p.λ_targets, path_bonus = path_bonus)
 
     n_total = length(targets)
     n_batches = max(1, min(p.on_policy_n_batches, n_total))
