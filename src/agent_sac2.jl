@@ -52,6 +52,9 @@ Base.@kwdef mutable struct SACPolicy2 <: AbstractPolicy
     # share of expert samples accepted by the Q-filter in the last BC update
     last_bc_accept::Float32 = 0.0f0
 
+    # soft value targets V(s′) from one sample a′ ~ π(·|s′) as in SAC (false) or
+    # as the mean over `antithetic_mean_samples` antithetic pairs (true)
+    antithetic_multisampling::Bool = false
     antithetic_mean_samples::Int = 16
     on_policy_n_batches::Int = 64
     on_policy_epochs::Int = 3
@@ -70,7 +73,7 @@ Base.@kwdef mutable struct SACPolicy2 <: AbstractPolicy
 end
 
 
-function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 7.0f0, min_σ = 2f-9, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false, on_policy_update_freq = 2500, λ_targets= 0.7f0, fear_factor = 0.1f0, target_frac = 0.3f0, verbose = false, antithetic_mean_samples = 16, on_policy_n_batches = 64, on_policy_epochs = 3, bc_alpha = nothing, weight_decay = 1e-4)
+function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, t =0.005f0, a =0.2f0, nna_scale = 1, nna_scale_critic = nothing, network_depth = 2, network_depth_critic = nothing, drop_middle_layer = nothing, drop_middle_layer_critic = nothing, learning_rate = 0.00001, learning_rate_critic = nothing, fun = gelu, fun_critic = nothing, tanh_end = false, n_agents = 1, logσ_is_network = false, batch_size = 32, start_steps = -1, start_policy = nothing, update_after = 1000, update_freq = 50, update_loops = 1, max_σ = 7.0f0, min_σ = 2f-9, clip_grad = 0.5, start_logσ = 0.0, betas = (0.9, 0.999), trajectory_length = 10_000, automatic_entropy_tuning = true, lr_alpha = nothing, target_entropy = nothing, use_popart = false, on_policy_update_freq = 2500, λ_targets= 0.7f0, fear_factor = 0.1f0, target_frac = 0.3f0, verbose = false, antithetic_multisampling = false, antithetic_mean_samples = 16, on_policy_n_batches = 64, on_policy_epochs = 3, bc_alpha = nothing, weight_decay = 1e-4)
 
     isnothing(nna_scale_critic)         &&  (nna_scale_critic = nna_scale)
     !isnothing(drop_middle_layer)        &&  (network_depth = drop_middle_layer ? 1 : 2)
@@ -146,6 +149,7 @@ function create_agent_sac2(;action_space, state_space, use_gpu = false, rng, y, 
             bc_alpha = isnothing(bc_alpha) ? nothing : Float32(bc_alpha),
             verbose = verbose,
 
+            antithetic_multisampling = antithetic_multisampling,
             antithetic_mean_samples = antithetic_mean_samples,
             on_policy_n_batches = on_policy_n_batches,
             on_policy_epochs = on_policy_epochs,
@@ -321,7 +325,7 @@ end
 function antithetic_mean_sac2(p, states, α; use_grad_a_q_norms = false, K = 16)
     μ, logσ = p.actor(p.device_rng, states)
 
-    acc_mu  = zeros(Float32, 1, size(μ,2), size(μ,3)) 
+    acc_v  = zeros(Float32, 1, size(μ,2), size(μ,3))
     acc_logp = zeros(Float32, 1, size(μ,2), size(μ,3))
     acc_mags  = zeros(Float32, size(μ,2)* size(μ,3)) 
 
@@ -350,8 +354,8 @@ function antithetic_mean_sac2(p, states, α; use_grad_a_q_norms = false, K = 16)
             y_minus2 = send_to_host(p.target_qnetwork2(vcat(states, a_minus)))
 
 
-            acc_mu .+= min.(y_plus1, y_plus2) .- α .* logp_π_plus
-            acc_mu .+= min.(y_minus1, y_minus2) .- α .* logp_π_minus
+            acc_v .+= min.(y_plus1, y_plus2) .- α .* logp_π_plus
+            acc_v .+= min.(y_minus1, y_minus2) .- α .* logp_π_minus
         end
     end
 
@@ -359,11 +363,40 @@ function antithetic_mean_sac2(p, states, α; use_grad_a_q_norms = false, K = 16)
     if use_grad_a_q_norms
         return acc_mags
     else
-        acc_mu ./= 2*K
+        acc_v ./= 2*K
         acc_logp ./= 2*K
 
-        return acc_mu, acc_logp
+        return acc_v, acc_logp
     end
+end
+
+
+# Soft value V(s′) = E[min_j Q̄_j(s′, a′) - α log π(a′|s′)] and log π(a′|s′) for
+# the targets: one sample a′ ~ π(·|s′) as in SAC, or the antithetic mean above
+# when `antithetic_multisampling` is set. Both come back as (1, n_agents, B).
+function soft_next_values_sac2(p, next_states, α)
+    p.antithetic_multisampling && return antithetic_mean_sac2(p, next_states, α)
+
+    a′, logp_π′ = p.actor(p.device_rng, next_states; is_sampling=true, is_return_log_prob=true)
+    q′_input = vcat(next_states, a′)
+    q′ = min.(send_to_host(p.target_qnetwork1(q′_input)), send_to_host(p.target_qnetwork2(q′_input)))
+    logp_π′ = send_to_host(logp_π′)
+
+    return q′ .- α .* logp_π′, logp_π′
+end
+
+
+# Temperature update exactly as in agent_sac.jl: J(α) = E[-α (log π + H̄)]
+# (Haarnoja et al. 2018, "SAC Algorithms and Applications") optimized in log α,
+# with log π of the target actions a′ ~ π(·|s′); log α is clamped for safety.
+function update_alpha_sac2!(p::SACPolicy2, logp_π′)
+    log_α_grad = Flux.gradient(p.log_α) do log_α
+        exp(log_α[1]) .* mean(-logp_π′ .- p.target_entropy)
+    end
+    Flux.update!(p.log_α_state_tree, p.log_α, log_α_grad[1])
+
+    clamp!(p.log_α, -12.5f0, 1.5f0)
+    p.α = exp.(p.log_α)[1]
 end
 
 
@@ -453,11 +486,7 @@ function on_policy_update(p::SACPolicy2, traj::AbstractTrajectory; whole_traject
     γ, τ, α = p.γ, p.τ, p.α
 
 
-    acc_mu, acc_logp = antithetic_mean_sac2(p, next_states, α)
-    
-    logp_π′ = acc_logp
-
-    next_values = acc_mu
+    next_values, logp_π′ = soft_next_values_sac2(p, next_states, α)
 
     # if whole_trajectory
     #     next_values[:,:, end] .*= 0.0f0     # terminal states
@@ -467,9 +496,9 @@ function on_policy_update(p::SACPolicy2, traj::AbstractTrajectory; whole_traject
     next_values = reshape( next_values, n_envs, :)
 
     # soft λ-return: where G_{t+1} replaces V(s_{t+1}), add the entropy bonus
-    # -α E[log π(·|s_{t+1})] (antithetic estimate) that the Q estimate of the
-    # taken action lacks
-    path_bonus = reshape(-α .* acc_logp, n_envs, :)
+    # -α E[log π(·|s_{t+1})] (same sample(s) as V(s_{t+1})) that the Q estimate
+    # of the taken action lacks
+    path_bonus = reshape(-α .* logp_π′, n_envs, :)
 
     targets = td_lambda_targets_sac2(r, ter, trun, next_values, γ; λ = p.λ_targets, path_bonus = path_bonus)
 
@@ -638,22 +667,10 @@ function on_policy_update(p::SACPolicy2, traj::AbstractTrajectory; whole_traject
         end
     end
 
-    # Tune entropy automatically
+    # Tune entropy automatically: one SAC temperature step on the window's
+    # next states (log π of the target actions)
     if p.automatic_entropy_tuning
-        # p.log_α -= p.lr_alpha * p.α * mean(-logp_π′ .- p.target_entropy)
-
-        log_α_grad = Flux.gradient(p.log_α) do log_α
-            exp(log_α[1]) .* mean(-logp_π′ .- p.target_entropy)
-        end
-
-        α_now = exp(p.log_α[1])
-        g_scaled = log_α_grad ./ max(α_now, 1e-12)
-        Flux.update!(p.log_α_state_tree, p.log_α, g_scaled[1])
-
-        clamp!(p.log_α, -12.5f0, 1.5f0)
-
-        p.α = exp.(p.log_α)[1]
-
+        update_alpha_sac2!(p, logp_π′)
     end
 
 
@@ -717,18 +734,13 @@ function update!(p::SACPolicy2, batch::NamedTuple{SARTTS})
     check_state_trees(p)
 
 
-    acc_mu, acc_logp = antithetic_mean_sac2(p, next_states, α)
-
-    next_values = acc_mu
+    next_values, logp_π′ = soft_next_values_sac2(p, next_states, α)
 
     n_envs = size(ter, 1)
     next_values = reshape( next_values, n_envs, :)
 
 
     y = r .+ γ .* (1 .- ter) .* next_values
-
-    
-    logp_π′ = acc_logp
 
     p.last_target_q_mean = mean(y)
     p.last_mean_minus_log_pi = mean(-logp_π′)
@@ -821,15 +833,6 @@ function update!(p::SACPolicy2, batch::NamedTuple{SARTTS})
     Flux.update!(p.actor_state_tree, p.actor, p_grad[1])
 
     if p.automatic_entropy_tuning
-        log_α_grad = Flux.gradient(p.log_α) do log_α
-            exp(log_α[1]) .* mean(-logp_π′ .- p.target_entropy)
-        end
-
-        α_now = exp(p.log_α[1])
-        g_scaled = log_α_grad ./ max(α_now, 1f-12)
-        Flux.update!(p.log_α_state_tree, p.log_α, g_scaled[1])
-
-        clamp!(p.log_α, -12.5f0, 1.5f0)
-        p.α = exp.(p.log_α)[1]
+        update_alpha_sac2!(p, logp_π′)
     end
 end
